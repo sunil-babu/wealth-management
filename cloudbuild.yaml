@@ -24,7 +24,7 @@ steps:
       - 'deploy'
       - 'wealth-mgmt'
       - '--image=gcr.io/$PROJECT_ID/wealth-mgmt:$SHORT_SHA'
-      - '--region=us-central1'
+      - '--region=europe-west4'
       - '--platform=managed'
       - '--allow-unauthenticated'
       - '--memory=512Mi'
@@ -33,7 +33,7 @@ steps:
       - '--concurrency=100'
       - '--max-instances=10'
       - '--service-account=wealth-mgmt-sa@$PROJECT_ID.iam.gserviceaccount.com'
-      - '--set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_API_URL=https://us-central1-aiplatform.googleapis.com/v1/projects/$PROJECT_ID/locations/us-central1/publishers/google/models/text-bison:predict,NODE_ENV=production'
+      - '--set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_API_URL=https://europe-west4-aiplatform.googleapis.com/v1/projects/$PROJECT_ID/locations/europe-west4/publishers/google/models/gemini-2.5-pro:predict,NODE_ENV=production'
 
 images:
   - 'gcr.io/$PROJECT_ID/wealth-mgmt:$SHORT_SHA'

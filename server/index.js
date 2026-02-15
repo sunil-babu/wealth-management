@@ -4,10 +4,36 @@ const path = require('path');
 const rateLimit = require('express-rate-limit');
 const helmet = require('helmet');
 const fetch = require('node-fetch');
+const fs = require('fs');
+const { GoogleAuth } = require('google-auth-library');
 
 const app = express();
 const PORT = process.env.PORT || 8080;
 const NODE_ENV = process.env.NODE_ENV || 'development';
+
+// Get absolute path to credentials
+let credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+if (credentialsPath && !path.isAbsolute(credentialsPath)) {
+  credentialsPath = path.join(__dirname, credentialsPath);
+}
+
+console.log('Credentials path:', credentialsPath);
+console.log('Credentials exist:', credentialsPath ? fs.existsSync(credentialsPath) : false);
+
+// Initialize Google Auth
+const auth = new GoogleAuth({
+  scopes: ['https://www.googleapis.com/auth/cloud-platform'],
+  keyFilename: credentialsPath
+});
+
+// DEBUG: Log environment variables
+console.log('=== Environment Variables ===');
+console.log('PORT:', process.env.PORT);
+console.log('NODE_ENV:', process.env.NODE_ENV);
+console.log('GOOGLE_CLOUD_PROJECT:', process.env.GOOGLE_CLOUD_PROJECT);
+console.log('VERTEX_API_URL:', process.env.VERTEX_API_URL);
+console.log('GOOGLE_APPLICATION_CREDENTIALS:', process.env.GOOGLE_APPLICATION_CREDENTIALS);
+console.log('==============================');
 
 // Logger utility
 const log = {
@@ -56,8 +82,12 @@ const validateAiRequest = (body) => {
 // Vertex AI proxy with GCP-native auth
 app.post('/api/vertex', async (req, res) => {
   const requestId = Math.random().toString(36).substring(7);
+  console.log('\n=== VERTEX ENDPOINT CALLED ===');
+  console.log('Request ID:', requestId);
   
   try {
+    console.log('Request body:', JSON.stringify(req.body));
+    
     // Validate input
     const validationError = validateAiRequest(req.body);
     if (validationError) {
@@ -68,24 +98,84 @@ app.post('/api/vertex', async (req, res) => {
     const vertexUrl = process.env.VERTEX_API_URL;
     const vertexProject = process.env.GOOGLE_CLOUD_PROJECT;
     
-    if (!vertexUrl && !vertexProject) {
-      log.error('Vertex AI not configured', { requestId });
+    // DEBUG - Very explicit
+    console.log('vertexUrl:', vertexUrl);
+    console.log('vertexProject:', vertexProject);
+    console.log('vertexUrl is truthy:', !!vertexUrl);
+    console.log('vertexProject is truthy:', !!vertexProject);
+    console.log('Check result - !vertexUrl:', !vertexUrl, '!vertexProject:', !vertexProject);
+    console.log('Full condition - (!vertexUrl || !vertexProject):', (!vertexUrl || !vertexProject));
+    
+    if (!vertexUrl || !vertexProject) {
+      console.log('FAILING - Missing config');
+      log.error('Vertex AI not configured', { requestId, hasUrl: !!vertexUrl, hasProject: !!vertexProject });
       return res.status(501).json({ error: 'Vertex AI not configured' });
     }
+    
+    console.log('Config check PASSED');
 
     log.info('AI request received', { requestId, promptLength: req.body.prompt.length });
 
-    // Use GCP Application Default Credentials (Cloud Run Workload Identity)
-    // For local dev: set GOOGLE_APPLICATION_CREDENTIALS
+    // Get access token for authentication
+    let token = '';
+    try {
+      token = await auth.getAccessToken();
+    } catch (authErr) {
+      log.error('Auth error', { requestId, message: authErr.message });
+      return res.status(401).json({ error: 'Failed to authenticate with Vertex AI' });
+    }
+
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
 
-    const resp = await fetch(vertexUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(req.body),
-      signal: controller.signal
-    });
+    // Check if using Gemini model (requires different API format)
+    const isGeminiModel = vertexUrl.includes('gemini');
+    
+    let resp;
+    if (isGeminiModel) {
+      // Gemini API uses generateContent endpoint
+      // Format: https://{region}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/google/models/{model}:generateContent
+      const geminiUrl = vertexUrl.replace(':predict', ':generateContent');
+      
+      const geminiBody = {
+        contents: [{
+          role: 'user',
+          parts: [{ text: req.body.prompt }]
+        }]
+      };
+
+      console.log('Calling Gemini API with URL:', geminiUrl);
+      console.log('Gemini body:', JSON.stringify(geminiBody));
+
+      resp = await fetch(geminiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(geminiBody),
+        signal: controller.signal
+      });
+    } else {
+      // Standard Vertex Predict API (for text-bison, etc.)
+      const vertexBody = {
+        instances: [{
+          prompt: req.body.prompt
+        }]
+      };
+
+      console.log('Calling Vertex Predict with body:', JSON.stringify(vertexBody));
+
+      resp = await fetch(vertexUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(vertexBody),
+        signal: controller.signal
+      });
+    }
     
     clearTimeout(timeout);
 

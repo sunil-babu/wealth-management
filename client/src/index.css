@@ -2,4 +2,71 @@
 @tailwind components;
 @tailwind utilities;
 
-html, body, #root { height: 100%; }
+html { 
+  scroll-behavior: smooth;
+}
+
+html, body, #root { 
+  height: 100%; 
+  margin: 0;
+  padding: 0;
+}
+
+/* Custom Green Slider Styling */
+.slider-green {
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.slider-green::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #10b981;
+  cursor: pointer;
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.3);
+  transition: all 0.2s;
+}
+
+.slider-green::-webkit-slider-thumb:hover {
+  background: #059669;
+  box-shadow: 0 0 0 6px rgba(16, 185, 129, 0.4);
+}
+
+.slider-green::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #10b981;
+  cursor: pointer;
+  border: none;
+  box-shadow: 0 0 0 4px rgba(16, 185, 129, 0.3);
+  transition: all 0.2s;
+}
+
+.slider-green::-moz-range-thumb:hover {
+  background: #059669;
+  box-shadow: 0 0 0 6px rgba(16, 185, 129, 0.4);
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
