@@ -1,0 +1,37 @@
+# Improved Dockerfile for Cloud Run
+
+FROM node:18-alpine AS builder
+
+# Build client
+WORKDIR /app/client
+COPY client/package*.json ./
+RUN npm ci
+COPY client/ .
+RUN npm run build
+
+# Build server
+WORKDIR /app/server
+COPY server/package*.json ./
+RUN npm ci --production
+COPY server/ .
+
+# Final stage - optimized for Cloud Run
+FROM node:18-alpine
+
+WORKDIR /usr/src/app
+
+# Copy built artifacts
+COPY --from=builder /app/server .
+COPY --from=builder /app/client/dist ./public
+
+# Health check
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD node -e "require('http').get('http://localhost:8080/health', (r) => {if (r.statusCode !== 200) throw new Error(r.statusCode)})"
+
+# Set environment
+ENV NODE_ENV=production
+ENV PORT=8080
+EXPOSE 8080
+
+# Cloud Run requires 0.0.0.0 binding
+CMD ["node", "index.js"]
