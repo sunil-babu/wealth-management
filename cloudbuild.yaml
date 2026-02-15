@@ -18,35 +18,22 @@ steps:
     args: ['push', 'gcr.io/$PROJECT_ID/wealth-mgmt:$SHORT_SHA']
 
   # Deploy to Cloud Run
-  - name: 'gcr.io/cloud-builders/gke-deploy'
-    args:
-      - run
-      - '--filename'
-      - '.'
-      - '--image'
-      - 'gcr.io/$PROJECT_ID/wealth-mgmt:$SHORT_SHA'
-      - '--location'
-      - 'us-central1'
-      - '--output'
-      - '/workspace/output'
-
-  # Deploy via gcloud CLI
   - name: 'gcr.io/cloud-builders/gcloud'
     args:
       - 'run'
       - 'deploy'
       - 'wealth-mgmt'
-      - '--image'
-      - 'gcr.io/$PROJECT_ID/wealth-mgmt:$SHORT_SHA'
-      - '--region'
-      - 'us-central1'
-      - '--platform'
-      - 'managed'
+      - '--image=gcr.io/$PROJECT_ID/wealth-mgmt:$SHORT_SHA'
+      - '--region=us-central1'
+      - '--platform=managed'
       - '--allow-unauthenticated'
-      - '--memory'
-      - '512Mi'
-      - '--set-env-vars'
-      - 'GOOGLE_CLOUD_PROJECT=$PROJECT_ID'
+      - '--memory=512Mi'
+      - '--cpu=1'
+      - '--timeout=60s'
+      - '--concurrency=100'
+      - '--max-instances=10'
+      - '--service-account=wealth-mgmt-sa@$PROJECT_ID.iam.gserviceaccount.com'
+      - '--set-env-vars=GOOGLE_CLOUD_PROJECT=$PROJECT_ID,VERTEX_API_URL=https://us-central1-aiplatform.googleapis.com/v1/projects/$PROJECT_ID/locations/us-central1/publishers/google/models/text-bison:predict,NODE_ENV=production'
 
 images:
   - 'gcr.io/$PROJECT_ID/wealth-mgmt:$SHORT_SHA'
