@@ -153,7 +153,7 @@ app.post('/api/vertex', async (req, res) => {
           temperature: 0.7,
           topP: 0.8,
           topK: 40,
-          maxOutputTokens: 2048, // Limit response length to improve speed
+          maxOutputTokens: 4096, // Increased for complete responses
           candidateCount: 1
         },
         safetySettings: [
@@ -220,7 +220,16 @@ app.post('/api/vertex', async (req, res) => {
     console.log('Parsing JSON response...');
     const data = await resp.json();
     console.log('JSON parsed successfully');
-    console.log('Vertex API success response:', JSON.stringify(data, null, 2));
+    
+    // Log response details
+    if (data.candidates && data.candidates[0] && data.candidates[0].content) {
+      const textContent = data.candidates[0].content.parts[0].text;
+      console.log('Response text length:', textContent.length);
+      console.log('Response text preview (first 200 chars):', textContent.substring(0, 200));
+      console.log('Response text end (last 200 chars):', textContent.substring(textContent.length - 200));
+    }
+    
+    console.log('Vertex API success response structure:', JSON.stringify(data, null, 2).substring(0, 1000));
     log.info('AI response sent', { requestId, responseSize: JSON.stringify(data).length });
     
     // Send response back to client

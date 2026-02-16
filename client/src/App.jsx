@@ -18,6 +18,35 @@ export default function App() {
   const [currentStep, setCurrentStep] = useState('household');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
+  const [validationErrors, setValidationErrors] = useState({});
+  
+  // Results state
+  const [showResults, setShowResults] = useState(false);
+  const [aiResponse, setAiResponse] = useState('');
+  const [metrics, setMetrics] = useState({
+    monthlyNeed: 0,
+    targetNestEgg: 0,
+    gapToFill: 0,
+    monthlySavingsTarget: 0
+  });
+  const [allocation, setAllocation] = useState({
+    stocks: 0,
+    bonds: 0,
+    realEstate: 0,
+    cash: 0
+  });
+  const [wealthProjection, setWealthProjection] = useState({
+    currentWealth: 0,
+    projectedAtRetirement: 0,
+    targetNestEgg: 0
+  });
+  const [actionSteps, setActionSteps] = useState([]);
+  const [dutchTaxOptimization, setDutchTaxOptimization] = useState({
+    box3Strategy: '',
+    pensionRecommendations: '',
+    estimatedAnnualTax: 0
+  });
+  const [recommendedProducts, setRecommendedProducts] = useState([]);
 
   // Loading messages to keep users engaged
   const loadingMessages = [
@@ -128,12 +157,81 @@ export default function App() {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
+  const validateStep = (step) => {
+    const errors = {};
+    
+    if (step === 'household') {
+      if (!formData.fullName.trim()) {
+        errors.fullName = 'Full name is required';
+      }
+      if (!formData.age || formData.age < 18 || formData.age > 100) {
+        errors.age = 'Please enter a valid age (18-100)';
+      }
+      if (!formData.retirementAge || formData.retirementAge < formData.age || formData.retirementAge > 100) {
+        errors.retirementAge = 'Retirement age must be greater than current age';
+      }
+      if (!formData.country.trim()) {
+        errors.country = 'Country is required';
+      }
+      if (formData.hasChildren && (!formData.childrenCount || formData.childrenCount < 1)) {
+        errors.childrenCount = 'Please enter number of children';
+      }
+    } else if (step === 'financials') {
+      if (formData.grossSalary === '' || formData.grossSalary === null || formData.grossSalary === undefined) {
+        errors.grossSalary = 'Gross salary is required (can be 0)';
+      }
+      if (formData.savingsAmount === '' || formData.savingsAmount === null || formData.savingsAmount === undefined) {
+        errors.savingsAmount = 'Savings amount is required (can be 0)';
+      }
+      if (formData.investmentAmount === '' || formData.investmentAmount === null || formData.investmentAmount === undefined) {
+        errors.investmentAmount = 'Investment amount is required (can be 0)';
+      }
+      if (formData.debtAmount === '' || formData.debtAmount === null || formData.debtAmount === undefined) {
+        errors.debtAmount = 'Debt amount is required (can be 0)';
+      }
+    } else if (step === 'dutchTax') {
+      if (formData.jaarruimte === '' || formData.jaarruimte === null || formData.jaarruimte === undefined) {
+        errors.jaarruimte = 'Jaarruimte is required (can be 0)';
+      }
+      if (formData.factorA === '' || formData.factorA === null || formData.factorA === undefined) {
+        errors.factorA = 'Factor A is required (can be 0)';
+      }
+    } else if (step === 'realEstate') {
+      if (formData.homeValue === '' || formData.homeValue === null || formData.homeValue === undefined) {
+        errors.homeValue = 'Home value is required (can be 0)';
+      }
+      if (formData.mortgageBalance === '' || formData.mortgageBalance === null || formData.mortgageBalance === undefined) {
+        errors.mortgageBalance = 'Mortgage balance is required (can be 0)';
+      }
+      if (formData.mortgageInterestRate === '' || formData.mortgageInterestRate === null || formData.mortgageInterestRate === undefined) {
+        errors.mortgageInterestRate = 'Interest rate is required (can be 0)';
+      }
+      if (formData.mortgageYearsLeft === '' || formData.mortgageYearsLeft === null || formData.mortgageYearsLeft === undefined) {
+        errors.mortgageYearsLeft = 'Years left is required (can be 0)';
+      }
+    }
+    
+    return errors;
+  };
+
   const handleGetStarted = () => {
     setShowQuestionnaire(true);
     setCurrentStep('household');
+    setValidationErrors({});
   };
 
   const handleContinue = async () => {
+    // Validate current step
+    const errors = validateStep(currentStep);
+    
+    if (Object.keys(errors).length > 0) {
+      setValidationErrors(errors);
+      return;
+    }
+    
+    // Clear errors and proceed
+    setValidationErrors({});
+    
     if (currentStep === 'household') {
       setCurrentStep('financials');
     } else if (currentStep === 'financials') {
@@ -157,17 +255,62 @@ export default function App() {
   };
 
   const submitToVertexAI = async () => {
-    const prompt = `Act as a Dutch wealth management advisor. Analyze this household and provide 3-5 key recommendations:
+    // Calculate total Box 3 assets
+    const totalBox3Assets = formData.savingsAmount + formData.investmentAmount - formData.debtAmount;
+    const taxFreeAllowance = formData.hasSpouse ? 114000 : 57000; // 2026 allowance
+    const taxableBase = Math.max(0, totalBox3Assets - taxFreeAllowance);
 
-HOUSEHOLD: Age ${formData.age}, Retiring ${formData.retirementAge}, ${formData.hasSpouse ? 'Partnered' : 'Single'}, ${formData.hasChildren ? formData.childrenCount + ' children' : 'No children'}
+    const prompt = `You are a Dutch FIRE expert. Analyze this profile and provide tax-optimized wealth strategy.
 
-INCOME: €${formData.grossSalary}/year, 30% Ruling: ${formData.has30PercentRuling ? 'Yes' : 'No'}
+PROFILE:
+Age: ${formData.age} → Retire: ${formData.retirementAge} | ${formData.hasSpouse ? 'Partnered' : 'Single'}${formData.hasChildren ? `, ${formData.childrenCount} kids` : ''} | Salary: €${formData.grossSalary} | 30% Ruling: ${formData.has30PercentRuling ? 'Yes' : 'No'}
+Box 3: Savings €${formData.savingsAmount}, Investments €${formData.investmentAmount}, Debt €${formData.debtAmount} (Net: €${totalBox3Assets}, Taxable: €${taxableBase})
+Real Estate: WOZ €${formData.homeValue}, Mortgage €${formData.mortgageBalance} @ ${formData.mortgageInterestRate}%, ${formData.mortgageYearsLeft}yr left
+Tax: Jaarruimte €${formData.jaarruimte}, Factor A €${formData.factorA}
 
-BOX 3 ASSETS: Savings €${formData.savingsAmount}, Investments €${formData.investmentAmount}, Debt €${formData.debtAmount}
+OUTPUT (exact format):
+MONTHLY_NEED: [number]
+TARGET_NEST_EGG: [number]
+GAP_TO_FILL: [number]
+MONTHLY_SAVINGS_TARGET: [number]
+ALLOCATION_STOCKS: [0-100]
+ALLOCATION_BONDS: [0-100]
+ALLOCATION_REAL_ESTATE: [0-100]
+ALLOCATION_CASH: [0-100]
+CURRENT_WEALTH: ${formData.savingsAmount + formData.investmentAmount - formData.debtAmount}
+PROJECTED_AT_RETIREMENT: [number]
+---ACTIONS---
+ACTION_STEP_1_TITLE: [title]
+ACTION_STEP_1_PRIORITY: [High Priority|Medium Priority|Low Priority]
+ACTION_STEP_1_TAG: [NL Tax|Strategy|Tax Hack]
+ACTION_STEP_1_DESC: [one sentence]
+ACTION_STEP_2_TITLE: [title]
+ACTION_STEP_2_PRIORITY: [High Priority|Medium Priority|Low Priority]
+ACTION_STEP_2_TAG: [NL Tax|Strategy|Tax Hack]
+ACTION_STEP_2_DESC: [one sentence]
+ACTION_STEP_3_TITLE: [title]
+ACTION_STEP_3_PRIORITY: [High Priority|Medium Priority|Low Priority]
+ACTION_STEP_3_TAG: [NL Tax|Strategy|Tax Hack]
+ACTION_STEP_3_DESC: [one sentence]
+---DUTCH_TAX---
+BOX3_STRATEGY: [2-3 sentences on Box 3 optimization with 2026 rates]
+PENSION_RECOMMENDATIONS: [2-3 sentences on jaarruimte/lijfrente]
+ESTIMATED_ANNUAL_BOX3_TAX: [number]
+---PRODUCTS---
+PRODUCT_1_NAME: [fund name]
+PRODUCT_1_TYPE: [ETF|Fund]
+PRODUCT_1_DESC: [one sentence]
+PRODUCT_2_NAME: [fund name]
+PRODUCT_2_TYPE: [ETF|Fund]
+PRODUCT_2_DESC: [one sentence]
+---
 
-REAL ESTATE: Home €${formData.homeValue}, Mortgage €${formData.mortgageBalance} at ${formData.mortgageInterestRate}% for ${formData.mortgageYearsLeft} years
+Then write normal analysis with sections:
+**THE COST OF INACTION:** (tax drag, lost returns)
+**THE OPTIMIZED PATH:** (3 steps: immediate/medium/long-term)
+**ALLOCATION RATIONALE:** (explain stocks/bonds/RE/cash % for age ${formData.age}, ${formData.retirementAge - formData.age}yr timeline)
 
-Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs investment strategy 4) Timeline to financial freedom. Keep response under 500 words.`;
+Keep under 500 words. Use Dutch terms (Box 3, jaarruimte, lijfrente). Recommend VWRL/IWDA for Dutch investors.`;
 
     setIsSubmitting(true);
     setLoadingMessageIndex(0);
@@ -198,14 +341,275 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
         throw new Error(errorMsg);
       }
 
-      console.log('Vertex AI Response:', result);
+      // Extract text from Gemini API response structure
+      let responseText = '';
+      if (result.candidates && result.candidates[0] && result.candidates[0].content && result.candidates[0].content.parts) {
+        responseText = result.candidates[0].content.parts[0].text;
+      } else if (result.text) {
+        responseText = result.text;
+      } else if (result.response) {
+        responseText = result.response;
+      } else {
+        responseText = JSON.stringify(result, null, 2);
+      }
       
-      // Close questionnaire and show results
+      // Parse metrics from response
+      const metricsParsed = {
+        monthlyNeed: 0,
+        targetNestEgg: 0,
+        gapToFill: 0,
+        monthlySavingsTarget: 0
+      };
+      
+      const allocationParsed = {
+        stocks: 0,
+        bonds: 0,
+        realEstate: 0,
+        cash: 0
+      };
+      
+      const projectionParsed = {
+        currentWealth: 0,
+        projectedAtRetirement: 0,
+        targetNestEgg: 0
+      };
+      
+      const actionStepsParsed = [];
+      const dutchTaxParsed = {
+        box3Strategy: '',
+        pensionRecommendations: '',
+        estimatedAnnualTax: 0
+      };
+      const productsParsed = [];
+      
+      // Split response into lines for parsing
+      const lines = responseText.split('\n');
+      let strategyLines = [];
+      let foundMetrics = false;
+      
+      // Parse each line
+      let currentSection = 'metrics'; // Track which section we're in
+      let currentMultiLineField = null; // Track if we're collecting multi-line values
+      let currentMultiLineValue = '';
+      
+      for (let line of lines) {
+        const trimmedLine = line.trim();
+        
+        // Check for section separators (both -- and --- format)
+        if (trimmedLine.match(/^-{2,}(ACTIONS|DUTCH_TAX|PRODUCTS)?-{0,}$/)) {
+          // Save any pending multi-line field
+          if (currentMultiLineField) {
+            if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
+            else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
+            currentMultiLineField = null;
+            currentMultiLineValue = '';
+          }
+          
+          if (trimmedLine.includes('ACTIONS')) currentSection = 'actions';
+          else if (trimmedLine.includes('DUTCH_TAX')) currentSection = 'dutch_tax';
+          else if (trimmedLine.includes('PRODUCTS')) currentSection = 'products';
+          else currentSection = 'strategy';
+          continue; // Skip separator lines
+        }
+        
+        // Parse based on current section
+        if (currentSection === 'metrics' || currentSection === 'actions' || currentSection === 'dutch_tax' || currentSection === 'products') {
+          // Check if this is a metric line
+          if (trimmedLine.startsWith('MONTHLY_NEED:')) {
+            const match = trimmedLine.match(/MONTHLY_NEED:\s*€?([\d,]+)/i);
+            if (match) metricsParsed.monthlyNeed = parseInt(match[1].replace(/,/g, ''));
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('TARGET_NEST_EGG:')) {
+            const match = trimmedLine.match(/TARGET_NEST_EGG:\s*€?([\d,]+)/i);
+            if (match) metricsParsed.targetNestEgg = parseInt(match[1].replace(/,/g, ''));
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('GAP_TO_FILL:')) {
+            const match = trimmedLine.match(/GAP_TO_FILL:\s*€?([\d,]+)/i);
+            if (match) metricsParsed.gapToFill = parseInt(match[1].replace(/,/g, ''));
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('MONTHLY_SAVINGS_TARGET:')) {
+            const match = trimmedLine.match(/MONTHLY_SAVINGS_TARGET:\s*€?([\d,]+)/i);
+            if (match) metricsParsed.monthlySavingsTarget = parseInt(match[1].replace(/,/g, ''));
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('ALLOCATION_STOCKS:')) {
+            const match = trimmedLine.match(/ALLOCATION_STOCKS:\s*(\d+)/i);
+            if (match) allocationParsed.stocks = parseInt(match[1]);
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('ALLOCATION_BONDS:')) {
+            const match = trimmedLine.match(/ALLOCATION_BONDS:\s*(\d+)/i);
+            if (match) allocationParsed.bonds = parseInt(match[1]);
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('ALLOCATION_REAL_ESTATE:')) {
+            const match = trimmedLine.match(/ALLOCATION_REAL_ESTATE:\s*(\d+)/i);
+            if (match) allocationParsed.realEstate = parseInt(match[1]);
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('ALLOCATION_CASH:')) {
+            const match = trimmedLine.match(/ALLOCATION_CASH:\s*(\d+)/i);
+            if (match) allocationParsed.cash = parseInt(match[1]);
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('CURRENT_WEALTH:')) {
+            const match = trimmedLine.match(/CURRENT_WEALTH:\s*€?([\d,]+)/i);
+            if (match) projectionParsed.currentWealth = parseInt(match[1].replace(/,/g, ''));
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('PROJECTED_AT_RETIREMENT:')) {
+            const match = trimmedLine.match(/PROJECTED_AT_RETIREMENT:\s*€?([\d,]+)/i);
+            if (match) projectionParsed.projectedAtRetirement = parseInt(match[1].replace(/,/g, ''));
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('ACTION_STEP_')) {
+            const stepMatch = trimmedLine.match(/ACTION_STEP_(\d+)_(TITLE|PRIORITY|TAG|DESC):\s*(.+)/i);
+            if (stepMatch) {
+              const stepNum = parseInt(stepMatch[1]) - 1;
+              const field = stepMatch[2].toLowerCase();
+              const value = stepMatch[3].trim();
+              
+              if (!actionStepsParsed[stepNum]) {
+                actionStepsParsed[stepNum] = { title: '', priority: '', tag: '', description: '' };
+              }
+              
+              if (field === 'title') actionStepsParsed[stepNum].title = value;
+              else if (field === 'priority') actionStepsParsed[stepNum].priority = value;
+              else if (field === 'tag') actionStepsParsed[stepNum].tag = value;
+              else if (field === 'desc') actionStepsParsed[stepNum].description = value;
+            }
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('BOX3_STRATEGY:')) {
+            // Save any pending multi-line field
+            if (currentMultiLineField) {
+              if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
+              else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
+            }
+            
+            const match = trimmedLine.match(/BOX3_STRATEGY:\s*(.+)/i);
+            currentMultiLineField = 'box3Strategy';
+            currentMultiLineValue = match && match[1] ? match[1].trim() : '';
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('PENSION_RECOMMENDATIONS:')) {
+            // Save any pending multi-line field
+            if (currentMultiLineField) {
+              if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
+              else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
+            }
+            
+            const match = trimmedLine.match(/PENSION_RECOMMENDATIONS:\s*(.+)/i);
+            currentMultiLineField = 'pensionRecommendations';
+            currentMultiLineValue = match && match[1] ? match[1].trim() : '';
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('ESTIMATED_ANNUAL_BOX3_TAX:')) {
+            // Save any pending multi-line field
+            if (currentMultiLineField) {
+              if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
+              else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
+              currentMultiLineField = null;
+              currentMultiLineValue = '';
+            }
+            
+            const match = trimmedLine.match(/ESTIMATED_ANNUAL_BOX3_TAX:\s*€?([\d,]+)/i);
+            if (match) dutchTaxParsed.estimatedAnnualTax = parseInt(match[1].replace(/,/g, ''));
+            foundMetrics = true;
+            continue;
+          } else if (trimmedLine.startsWith('PRODUCT_')) {
+            // Save any pending multi-line field
+            if (currentMultiLineField) {
+              if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
+              else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
+              currentMultiLineField = null;
+              currentMultiLineValue = '';
+            }
+            
+            const prodMatch = trimmedLine.match(/PRODUCT_(\d+)_(NAME|TYPE|DESC):\s*(.+)/i);
+            if (prodMatch) {
+              const prodNum = parseInt(prodMatch[1]) - 1;
+              const field = prodMatch[2].toLowerCase();
+              const value = prodMatch[3].trim();
+              
+              if (!productsParsed[prodNum]) {
+                productsParsed[prodNum] = { name: '', type: '', description: '' };
+              }
+              
+              if (field === 'name') productsParsed[prodNum].name = value;
+              else if (field === 'type') productsParsed[prodNum].type = value;
+              else if (field === 'desc') productsParsed[prodNum].description = value;
+            }
+            foundMetrics = true;
+            continue;
+          } else if (currentMultiLineField && trimmedLine && currentSection === 'dutch_tax') {
+            // Continue collecting multi-line value for Dutch Tax fields
+            currentMultiLineValue += ' ' + trimmedLine;
+            continue;
+          }
+          
+          // If we're in a structured section but this line doesn't match any pattern,
+          // save any pending multi-line field and check if we should switch to strategy mode
+          if (currentMultiLineField) {
+            if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
+            else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
+            currentMultiLineField = null;
+            currentMultiLineValue = '';
+          }
+          
+          if (currentSection !== 'strategy' && trimmedLine && 
+              !trimmedLine.match(/^(MONTHLY_NEED|TARGET_NEST_EGG|GAP_TO_FILL|MONTHLY_SAVINGS_TARGET|ALLOCATION_|CURRENT_WEALTH|PROJECTED_AT_RETIREMENT|ACTION_STEP_|BOX3_STRATEGY|PENSION_RECOMMENDATIONS|ESTIMATED_ANNUAL_BOX3_TAX|PRODUCT_)/i)) {
+            currentSection = 'strategy';
+          }
+        }
+        
+        // Add to strategy text if we're in the strategy section
+        // Skip lines that look like structured data patterns
+        if (currentSection === 'strategy' && trimmedLine) {
+          // Don't add lines that are structured data patterns
+          if (!trimmedLine.match(/^(MONTHLY_NEED|TARGET_NEST_EGG|GAP_TO_FILL|MONTHLY_SAVINGS_TARGET|ALLOCATION_|CURRENT_WEALTH|PROJECTED_AT_RETIREMENT|ACTION_STEP|BOX3_STRATEGY|PENSION_RECOMMENDATIONS|ESTIMATED_ANNUAL_BOX3_TAX|PRODUCT_)/i)) {
+            strategyLines.push(line);
+          }
+        }
+      }
+      
+      // Save any pending multi-line field at the end
+      if (currentMultiLineField) {
+        if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
+        else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
+      }
+      
+      // Join strategy lines and clean up
+      let strategyText = strategyLines.join('\n').trim();
+      
+      // Set target nest egg in projection
+      projectionParsed.targetNestEgg = metricsParsed.targetNestEgg;
+      
+      // Calculate current wealth from form data if not provided by AI
+      if (projectionParsed.currentWealth === 0) {
+        projectionParsed.currentWealth = formData.savingsAmount + formData.investmentAmount - formData.debtAmount;
+      }
+      
+      // If no metrics were found, use form data for current wealth as fallback
+      if (!foundMetrics) {
+        projectionParsed.currentWealth = formData.savingsAmount + formData.investmentAmount - formData.debtAmount;
+      }
+      
+      // Store AI response and show results page
+      setMetrics(metricsParsed);
+      setAllocation(allocationParsed);
+      setWealthProjection(projectionParsed);
+      setActionSteps(actionStepsParsed.filter(step => step.title)); // Filter out empty steps
+      setDutchTaxOptimization(dutchTaxParsed);
+      setRecommendedProducts(productsParsed.filter(product => product.name)); // Filter out empty products
+      setAiResponse(strategyText);
       setShowQuestionnaire(false);
+      setShowResults(true);
       setIsSubmitting(false);
-      alert(`Analysis complete! Your personalized wealth strategy has been generated.\n\nName: ${formData.fullName}\nAge: ${formData.age}\nRetirement Age: ${formData.retirementAge}\n\nCheck the console for detailed recommendations.`);
     } catch (error) {
-      console.error('Error submitting to Vertex AI:', error);
       setIsSubmitting(false);
       
       // Better error messages based on error type
@@ -223,23 +627,636 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
     }
   };
 
+  const handleAdjustParameters = () => {
+    setShowResults(false);
+    setShowQuestionnaire(true);
+    setCurrentStep('household');
+  };
+
+  // Results Page UI
+  if (showResults) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+        {/* Main Content */}
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+          {/* Header Badge */}
+          <div className="flex justify-center mb-6 sm:mb-8">
+            <div className="inline-flex items-center gap-2 px-4 py-2 bg-amber-500/10 border border-amber-500/30 rounded-full">
+              <svg className="w-4 h-4 text-amber-500" fill="currentColor" viewBox="0 0 20 20">
+                <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+              </svg>
+              <span className="text-amber-500 font-semibold text-sm">AI-Powered Planning</span>
+            </div>
+          </div>
+
+          {/* Title */}
+          <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white text-center mb-4">
+            Plan Your Path to FIRE
+          </h1>
+          <p className="text-slate-400 text-center text-base sm:text-lg mb-8 sm:mb-12 max-w-3xl mx-auto">
+            Tailored for the Netherlands. Smart strategies considering Dutch tax rules, pension pillars, and wealth-building opportunities.
+          </p>
+
+          {/* Metrics Cards */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 sm:gap-6 mb-6 sm:mb-8">
+            {/* Monthly Need (Future) */}
+            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg">
+              <div className="flex items-start justify-between mb-3">
+                <div className="text-slate-600 text-sm font-medium">Monthly Need (Future)</div>
+                <div className="w-10 h-10 sm:w-12 sm:h-12 bg-blue-500 rounded-xl flex items-center justify-center">
+                  <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+              </div>
+              <div className="text-2xl sm:text-3xl font-bold text-slate-900">
+                €{metrics.monthlyNeed.toLocaleString()}
+              </div>
+            </div>
+
+            {/* Target Nest Egg */}
+            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg">
+              <div className="flex items-start justify-between mb-3">
+                <div className="text-slate-600 text-sm font-medium">Target Nest Egg</div>
+                <div className="w-10 h-10 sm:w-12 sm:h-12 bg-emerald-500 rounded-xl flex items-center justify-center">
+                  <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 8h6m-5 0a3 3 0 110 6H9l3 3m-3-6h6m6 1a9 9 0 11-18 0 9 9 0 0118 0z" />
+                  </svg>
+                </div>
+              </div>
+              <div className="text-2xl sm:text-3xl font-bold text-slate-900">
+                €{metrics.targetNestEgg.toLocaleString()}
+              </div>
+            </div>
+
+            {/* Gap to Fill */}
+            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg">
+              <div className="flex items-start justify-between mb-3">
+                <div className="text-slate-600 text-sm font-medium">Gap to Fill</div>
+                <div className="w-10 h-10 sm:w-12 sm:h-12 bg-orange-500 rounded-xl flex items-center justify-center">
+                  <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                  </svg>
+                </div>
+              </div>
+              <div className="text-2xl sm:text-3xl font-bold text-slate-900">
+                €{metrics.gapToFill.toLocaleString()}
+              </div>
+            </div>
+
+            {/* Monthly Savings Target */}
+            <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg">
+              <div className="flex items-start justify-between mb-3">
+                <div className="text-slate-600 text-sm font-medium">Monthly Savings Target</div>
+                <div className="w-10 h-10 sm:w-12 sm:h-12 bg-purple-500 rounded-xl flex items-center justify-center">
+                  <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                  </svg>
+                </div>
+              </div>
+              <div className="text-2xl sm:text-3xl font-bold text-slate-900">
+                €{metrics.monthlySavingsTarget.toLocaleString()}
+              </div>
+            </div>
+          </div>
+
+          {/* Adjust Parameters Link */}
+          <div className="mb-6">
+            <button
+              onClick={handleAdjustParameters}
+              className="text-emerald-400 hover:text-emerald-500 flex items-center gap-2 text-sm font-medium transition-colors"
+            >
+              <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+              </svg>
+              Adjust Parameters
+            </button>
+          </div>
+
+          {/* Personalized Strategy Section */}
+          <div className="bg-slate-800 rounded-2xl p-6 sm:p-8 mb-8 sm:mb-12 border border-slate-700">
+            <div className="flex items-start gap-3 mb-6">
+              <span className="text-2xl">💡</span>
+              <h2 className="text-white text-xl sm:text-2xl font-bold">Your Personalized Strategy</h2>
+            </div>
+            
+            <div className="prose prose-invert prose-slate max-w-none">
+              <div className="text-slate-300 leading-relaxed text-sm sm:text-base space-y-4">
+                {aiResponse.split('\n').map((line, index) => {
+                  const trimmed = line.trim();
+                  
+                  // Skip empty lines
+                  if (!trimmed) {
+                    return <div key={index} className="h-2"></div>;
+                  }
+                  
+                  // Skip any structured data patterns that might have slipped through
+                  if (trimmed.match(/^(MONTHLY_NEED|TARGET_NEST_EGG|GAP_TO_FILL|MONTHLY_SAVINGS_TARGET|ALLOCATION_|CURRENT_WEALTH|PROJECTED_AT_RETIREMENT|ACTION_STEP|BOX3_STRATEGY|PENSION_RECOMMENDATIONS|ESTIMATED_ANNUAL_BOX3_TAX|PRODUCT_)/i)) {
+                    return null;
+                  }
+                  
+                  // Handle ### markdown headings
+                  if (trimmed.startsWith('###')) {
+                    const heading = trimmed.replace(/^###\s*/, '').replace(/\*\*/g, '').replace(/:/g, '');
+                    return (
+                      <h3 key={index} className="text-emerald-400 font-bold text-lg sm:text-xl mt-6 mb-3 first:mt-0">
+                        {heading}
+                      </h3>
+                    );
+                  }
+                  
+                  // Handle ## markdown headings
+                  if (trimmed.startsWith('##')) {
+                    const heading = trimmed.replace(/^##\s*/, '').replace(/\*\*/g, '').replace(/:/g, '');
+                    return (
+                      <h2 key={index} className="text-emerald-400 font-bold text-xl sm:text-2xl mt-6 mb-3 first:mt-0">
+                        {heading}
+                      </h2>
+                    );
+                  }
+                  
+                  // Handle bold headings with ** markers
+                  if (trimmed.startsWith('**') && (trimmed.includes(':**') || trimmed.endsWith('**'))) {
+                    const heading = trimmed.replace(/\*\*/g, '').replace(/:/g, '');
+                    return (
+                      <h3 key={index} className="text-emerald-400 font-bold text-lg sm:text-xl mt-6 mb-3 first:mt-0">
+                        {heading}
+                      </h3>
+                    );
+                  }
+                  
+                  // Handle numbered lists
+                  if (/^\d+\.\s/.test(trimmed)) {
+                    const text = trimmed.replace(/^\d+\.\s*/, '');
+                    // Replace inline bold with span tags
+                    const formattedText = text.split(/(\*\*[^*]+\*\*)/).map((part, i) => {
+                      if (part.startsWith('**') && part.endsWith('**')) {
+                        return <strong key={i} className="text-white font-bold">{part.slice(2, -2)}</strong>;
+                      }
+                      return part;
+                    });
+                    return (
+                      <div key={index} className="flex gap-3 mb-2 ml-4">
+                        <span className="text-emerald-400 font-semibold flex-shrink-0">{trimmed.match(/^\d+\./)[0]}</span>
+                        <span className="flex-1">{formattedText}</span>
+                      </div>
+                    );
+                  }
+                  
+                  // Handle bullet points
+                  if (trimmed.startsWith('-') || trimmed.startsWith('•') || trimmed.startsWith('*')) {
+                    const text = trimmed.replace(/^[-•*]\s*/, '');
+                    // Replace inline bold with span tags
+                    const formattedText = text.split(/(\*\*[^*]+\*\*)/).map((part, i) => {
+                      if (part.startsWith('**') && part.endsWith('**')) {
+                        return <strong key={i} className="text-white font-bold">{part.slice(2, -2)}</strong>;
+                      }
+                      return part;
+                    });
+                    return (
+                      <div key={index} className="flex gap-3 mb-2 ml-4">
+                        <span className="text-emerald-400 mt-1">•</span>
+                        <span className="flex-1">{formattedText}</span>
+                      </div>
+                    );
+                  }
+                  
+                  // Regular paragraphs with inline bold support
+                  const formattedText = line.split(/(\*\*[^*]+\*\*)/).map((part, i) => {
+                    if (part.startsWith('**') && part.endsWith('**')) {
+                      return <strong key={i} className="text-white font-bold">{part.slice(2, -2)}</strong>;
+                    }
+                    return part;
+                  });
+                  
+                  return (
+                    <p key={index} className="text-slate-300 leading-relaxed mb-3">
+                      {formattedText}
+                    </p>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          {/* Wealth Projection and Allocation Grid */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 sm:gap-8 mb-8 sm:mb-12">
+            {/* Wealth Projection */}
+            <div className="bg-white rounded-2xl p-6 sm:p-8 shadow-lg">
+              <div className="flex items-center gap-2 mb-6">
+                <svg className="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+                </svg>
+                <h3 className="text-slate-900 text-lg sm:text-xl font-bold">Wealth Projection</h3>
+              </div>
+              
+              {/* Simple Line Chart */}
+              <div className="mb-6">
+                <svg viewBox="0 0 500 300" className="w-full h-auto">
+                  {/* Grid lines */}
+                  <line x1="50" y1="250" x2="450" y2="250" stroke="#e2e8f0" strokeWidth="1"/>
+                  <line x1="50" y1="200" x2="450" y2="200" stroke="#e2e8f0" strokeWidth="1"/>
+                  <line x1="50" y1="150" x2="450" y2="150" stroke="#e2e8f0" strokeWidth="1"/>
+                  <line x1="50" y1="100" x2="450" y2="100" stroke="#e2e8f0" strokeWidth="1"/>
+                  <line x1="50" y1="50" x2="450" y2="50" stroke="#e2e8f0" strokeWidth="1"/>
+                  
+                  {/* Axes */}
+                  <line x1="50" y1="50" x2="50" y2="250" stroke="#94a3b8" strokeWidth="2"/>
+                  <line x1="50" y1="250" x2="450" y2="250" stroke="#94a3b8" strokeWidth="2"/>
+                  
+                  {/* Y-axis labels */}
+                  <text x="35" y="55" fontSize="10" fill="#64748b" textAnchor="end">€{(wealthProjection.targetNestEgg * 1.2 / 1000).toFixed(0)}k</text>
+                  <text x="35" y="105" fontSize="10" fill="#64748b" textAnchor="end">€{(wealthProjection.targetNestEgg * 0.9 / 1000).toFixed(0)}k</text>
+                  <text x="35" y="155" fontSize="10" fill="#64748b" textAnchor="end">€{(wealthProjection.targetNestEgg * 0.6 / 1000).toFixed(0)}k</text>
+                  <text x="35" y="205" fontSize="10" fill="#64748b" textAnchor="end">€{(wealthProjection.targetNestEgg * 0.3 / 1000).toFixed(0)}k</text>
+                  <text x="35" y="255" fontSize="10" fill="#64748b" textAnchor="end">€0</text>
+                  
+                  {/* X-axis labels */}
+                  <text x="50" y="270" fontSize="10" fill="#64748b" textAnchor="middle">Year 0</text>
+                  <text x="150" y="270" fontSize="10" fill="#64748b" textAnchor="middle">Year 5</text>
+                  <text x="250" y="270" fontSize="10" fill="#64748b" textAnchor="middle">Year 10</text>
+                  <text x="350" y="270" fontSize="10" fill="#64748b" textAnchor="middle">Year 15</text>
+                  <text x="450" y="270" fontSize="10" fill="#64748b" textAnchor="middle">Year {formData.retirementAge - formData.age}</text>
+                  
+                  {/* X-axis label */}
+                  <text x="250" y="290" fontSize="12" fill="#64748b" textAnchor="middle" fontWeight="500">Years</text>
+                  
+                  {/* Growth curve */}
+                  {(() => {
+                    const years = formData.retirementAge - formData.age;
+                    const maxWealth = Math.max(wealthProjection.targetNestEgg, wealthProjection.projectedAtRetirement);
+                    const scale = 200 / maxWealth;
+                    
+                    // Generate points for a compound growth curve
+                    const points = [];
+                    for (let year = 0; year <= years; year++) {
+                      const x = 50 + (year / years) * 400;
+                      // Exponential growth simulation
+                      const growthFactor = Math.pow(1 + 0.09, year); // 9% annual growth assumption
+                      const wealth = wealthProjection.currentWealth * growthFactor;
+                      const y = 250 - (wealth * scale);
+                      points.push(`${x},${Math.max(50, Math.min(250, y))}`);
+                    }
+                    
+                    return (
+                      <polyline
+                        points={points.join(' ')}
+                        stroke="#3b82f6"
+                        strokeWidth="3"
+                        fill="none"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                      />
+                    );
+                  })()}
+                  
+                  {/* Data points */}
+                  <circle cx="50" cy={Math.min(250, Math.max(50, 250 - (wealthProjection.currentWealth / Math.max(wealthProjection.targetNestEgg, wealthProjection.projectedAtRetirement) * 200)))} r="5" fill="#3b82f6" stroke="white" strokeWidth="2"/>
+                  <circle cx="450" cy={Math.min(250, Math.max(50, 250 - (wealthProjection.projectedAtRetirement / Math.max(wealthProjection.targetNestEgg, wealthProjection.projectedAtRetirement) * 200)))} r="5" fill="#3b82f6" stroke="white" strokeWidth="2"/>
+                  
+                  {/* Target line */}
+                  <line x1="50" y1={Math.max(50, 250 - (wealthProjection.targetNestEgg / Math.max(wealthProjection.targetNestEgg, wealthProjection.projectedAtRetirement) * 200))} x2="450" y2={Math.max(50, 250 - (wealthProjection.targetNestEgg / Math.max(wealthProjection.targetNestEgg, wealthProjection.projectedAtRetirement) * 200))} stroke="#10b981" strokeWidth="2" strokeDasharray="5,5"/>
+                  <text x="455" y={Math.max(55, 255 - (wealthProjection.targetNestEgg / Math.max(wealthProjection.targetNestEgg, wealthProjection.projectedAtRetirement) * 200))} fontSize="11" fill="#10b981" fontWeight="bold">Target: €{(wealthProjection.targetNestEgg / 1000000).toFixed(2)}M</text>
+                </svg>
+              </div>
+              
+              {/* Wealth Stats */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="bg-blue-50 rounded-lg p-3">
+                  <div className="text-xs text-slate-600 mb-1">Current Wealth</div>
+                  <div className="text-lg font-bold text-slate-900">€{(wealthProjection.currentWealth / 1000).toFixed(0)}k</div>
+                </div>
+                <div className="bg-slate-50 rounded-lg p-3">
+                  <div className="text-xs text-slate-600 mb-1">Projected at Retirement</div>
+                  <div className="text-lg font-bold text-slate-900">€{(wealthProjection.projectedAtRetirement / 1000000).toFixed(2)}M</div>
+                </div>
+                <div className="bg-emerald-50 rounded-lg p-3">
+                  <div className="text-xs text-slate-600 mb-1">Target Nest Egg</div>
+                  <div className="text-lg font-bold text-emerald-600">€{(wealthProjection.targetNestEgg / 1000000).toFixed(2)}M</div>
+                </div>
+              </div>
+            </div>
+
+            {/* Recommended Allocation */}
+            <div className="bg-white rounded-2xl p-6 sm:p-8 shadow-lg">
+              <h3 className="text-slate-900 text-lg sm:text-xl font-bold mb-6">Recommended Allocation</h3>
+              
+              <div className="space-y-5">
+                {/* Stocks & ETFs */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-slate-700 font-medium text-sm">Stocks & ETFs</span>
+                    <span className="text-slate-900 font-bold">{allocation.stocks}%</span>
+                  </div>
+                  <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
+                    <div 
+                      className="bg-slate-800 h-full rounded-full transition-all duration-500"
+                      style={{ width: `${allocation.stocks}%` }}
+                    ></div>
+                  </div>
+                </div>
+
+                {/* Bonds */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-slate-700 font-medium text-sm">Bonds</span>
+                    <span className="text-slate-900 font-bold">{allocation.bonds}%</span>
+                  </div>
+                  <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
+                    <div 
+                      className="bg-emerald-500 h-full rounded-full transition-all duration-500"
+                      style={{ width: `${allocation.bonds}%` }}
+                    ></div>
+                  </div>
+                </div>
+
+                {/* Real Estate */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-slate-700 font-medium text-sm">Real Estate</span>
+                    <span className="text-slate-900 font-bold">{allocation.realEstate}%</span>
+                  </div>
+                  <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
+                    <div 
+                      className="bg-slate-300 h-full rounded-full transition-all duration-500"
+                      style={{ width: `${allocation.realEstate}%` }}
+                    ></div>
+                  </div>
+                </div>
+
+                {/* Cash Reserve */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <span className="text-slate-700 font-medium text-sm">Cash Reserve</span>
+                    <span className="text-slate-900 font-bold">{allocation.cash}%</span>
+                  </div>
+                  <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
+                    <div 
+                      className="bg-slate-400 h-full rounded-full transition-all duration-500"
+                      style={{ width: `${allocation.cash}%` }}
+                    ></div>
+                  </div>
+                </div>
+              </div>
+
+              {/* Allocation Rationale */}
+              {allocation.stocks > 0 && (
+                <div className="mt-6 p-4 bg-slate-50 rounded-lg">
+                  <h4 className="text-slate-900 font-semibold text-sm mb-2">Allocation Rationale:</h4>
+                  <p className="text-slate-600 text-xs leading-relaxed">
+                    Given your age ({formData.age}) and {formData.retirementAge - formData.age}-year investment horizon, 
+                    a {allocation.stocks}% allocation to stocks maximizes compounding growth. 
+                    {allocation.bonds > 0 && ` ${allocation.bonds}% in bonds provides stability, while `}
+                    {allocation.cash > 0 && ` ${allocation.cash}% cash reserve ensures liquidity for emergencies`}
+                    {allocation.realEstate > 0 && ` and ${allocation.realEstate}% real estate offers diversification`}.
+                  </p>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Key Action Steps */}
+          {actionSteps.length > 0 && (
+            <div className="mb-8 sm:mb-12">
+              <h2 className="text-white text-2xl sm:text-3xl font-bold mb-6">Key Action Steps</h2>
+              
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
+                {actionSteps.map((step, index) => (
+                  <div key={index} className="bg-white rounded-xl p-6 shadow-lg">
+                    <div className="flex items-start justify-between mb-3">
+                      <span className={`text-xs font-bold px-3 py-1 rounded-full ${
+                        step.priority === 'High Priority' ? 'bg-red-100 text-red-700' :
+                        step.priority === 'Medium Priority' ? 'bg-yellow-100 text-yellow-700' :
+                        'bg-blue-100 text-blue-700'
+                      }`}>
+                        {step.priority}
+                      </span>
+                      <span className="text-xs font-medium px-2 py-1 bg-slate-100 text-slate-700 rounded">
+                        {step.tag}
+                      </span>
+                    </div>
+                    <h3 className="text-slate-900 text-lg font-bold mb-2">{step.title}</h3>
+                    <p className="text-slate-600 text-sm leading-relaxed">{step.description}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Dutch Tax Optimization */}
+          {(dutchTaxOptimization.box3Strategy || dutchTaxOptimization.pensionRecommendations || dutchTaxOptimization.estimatedAnnualTax > 0) && (
+            <div className="mb-8 sm:mb-12">
+              <div className="bg-gradient-to-br from-emerald-50 to-teal-50 border-l-4 border-emerald-500 rounded-xl p-6 sm:p-8">
+                <div className="flex items-start gap-3 mb-6">
+                  <svg className="w-8 h-8 text-emerald-600 flex-shrink-0 mt-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
+                  </svg>
+                  <h2 className="text-slate-900 text-xl sm:text-2xl font-bold">Dutch Tax Optimization</h2>
+                </div>
+                
+                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                  {/* Box 3 Strategy */}
+                  {dutchTaxOptimization.box3Strategy && (
+                    <div>
+                      <h3 className="text-slate-900 font-bold text-base mb-3">Box 3 Strategy</h3>
+                      <p className="text-slate-700 text-sm leading-relaxed">
+                        {dutchTaxOptimization.box3Strategy}
+                      </p>
+                    </div>
+                  )}
+                  
+                  {/* Pension Recommendations */}
+                  {dutchTaxOptimization.pensionRecommendations && (
+                    <div>
+                      <h3 className="text-slate-900 font-bold text-base mb-3">Pension Recommendations</h3>
+                      <p className="text-slate-700 text-sm leading-relaxed">
+                        {dutchTaxOptimization.pensionRecommendations}
+                      </p>
+                    </div>
+                  )}
+                </div>
+                
+                {/* Estimated Annual Tax */}
+                {dutchTaxOptimization.estimatedAnnualTax > 0 && (
+                  <div className="mt-6 pt-6 border-t border-emerald-200">
+                    <div className="bg-white rounded-lg p-4 inline-block">
+                      <span className="text-emerald-600 font-bold text-2xl">
+                        Estimated Annual Box 3 Tax: €{dutchTaxOptimization.estimatedAnnualTax.toLocaleString()}
+                      </span>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {/* Recommended Dutch Products */}
+          {recommendedProducts.length > 0 && (
+            <div className="mb-8 sm:mb-12">
+              <div className="flex items-start gap-3 mb-6">
+                <svg className="w-8 h-8 text-emerald-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+                <h2 className="text-white text-2xl sm:text-3xl font-bold">Recommended Dutch Products</h2>
+              </div>
+              
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {recommendedProducts.map((product, index) => (
+                  <div key={index} className="bg-white rounded-xl p-6 shadow-lg">
+                    <div className="flex items-start justify-between mb-3">
+                      <h3 className="text-slate-900 text-lg font-bold flex-1">{product.name}</h3>
+                      <span className="text-xs font-medium px-3 py-1 bg-emerald-100 text-emerald-700 rounded ml-2 flex-shrink-0">
+                        {product.type}
+                      </span>
+                    </div>
+                    <p className="text-slate-600 text-sm leading-relaxed">{product.description}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          {/* Your Wealth Journey */}
+          <div className="mb-8 sm:mb-12">
+            <div className="flex items-center gap-3 mb-8">
+              <svg className="w-8 h-8 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
+              </svg>
+              <h2 className="text-white text-2xl sm:text-3xl font-bold">Your Wealth Journey</h2>
+            </div>
+
+            <div className="bg-white rounded-2xl p-6 sm:p-8 shadow-lg">
+              <div className="space-y-8">
+                {(() => {
+                  // Calculate milestone years and amounts
+                  const currentYear = new Date().getFullYear();
+                  const yearsToRetirement = formData.retirementAge - formData.age;
+                  const currentWealth = wealthProjection.currentWealth;
+                  const targetWealth = wealthProjection.targetNestEgg || wealthProjection.projectedAtRetirement;
+                  const monthlyContribution = metrics.monthlySavingsTarget || 0;
+                  const annualReturn = 0.09; // 9% default
+
+                  // Calculate wealth at various milestones years
+                  const milestoneYears = [
+                    Math.min(0, yearsToRetirement),
+                    Math.floor(yearsToRetirement * 0.15),
+                    Math.floor(yearsToRetirement * 0.4),
+                    Math.floor(yearsToRetirement * 0.65),
+                    yearsToRetirement
+                  ].filter((value, index, self) => self.indexOf(value) === index).sort((a, b) => a - b);
+
+                  const calculateWealthAtYear = (years) => {
+                    if (years === 0) return currentWealth;
+                    
+                    // Future value of current wealth
+                    const fvCurrentWealth = currentWealth * Math.pow(1 + annualReturn, years);
+                    
+                    // Future value of monthly contributions
+                    const monthlyRate = annualReturn / 12;
+                    const months = years * 12;
+                    const fvContributions = monthlyContribution * ((Math.pow(1 + monthlyRate, months) - 1) / monthlyRate);
+                    
+                    return Math.round(fvCurrentWealth + fvContributions);
+                  };
+
+                  const getMilestoneDescription = (wealth, targetWealth, isLast) => {
+                    if (isLast) {
+                      return "Achieve your target nest egg of €" + (targetWealth / 1000).toFixed(0) + "k. Congratulations, you are financially independent!";
+                    }
+                    
+                    if (wealth >= 1000000) {
+                      return "Approach the €1,000,000 mark. Your wealth is growing substantially, with investment returns contributing significantly.";
+                    } else if (wealth >= 500000) {
+                      return "Surpass €500,000 in total wealth. You're now well on your way, having crossed a major psychological barrier.";
+                    } else if (wealth >= 250000) {
+                      return "Reach €250,000 in total wealth. This demonstrates significant momentum and the power of compounding.";
+                    } else if (wealth >= 100000) {
+                      return "Surpass €100,000 in total wealth. This early milestone confirms your savings discipline and initial investment growth.";
+                    } else {
+                      return "Building your foundation with consistent savings and smart investment strategies.";
+                    }
+                  };
+
+                  return milestoneYears.map((yearsFromNow, index) => {
+                    const year = currentYear + yearsFromNow;
+                    const wealth = calculateWealthAtYear(yearsFromNow);
+                    const isLast = index === milestoneYears.length - 1;
+                    const description = getMilestoneDescription(wealth, targetWealth, isLast);
+
+                    return (
+                      <div key={index} className="flex gap-4 relative">
+                        {/* Timeline dot and line */}
+                        <div className="flex flex-col items-center">
+                          <div className="w-12 h-12 rounded-full bg-emerald-500 flex items-center justify-center flex-shrink-0">
+                            <div className="w-6 h-6 rounded-full bg-white"></div>
+                          </div>
+                          {index < milestoneYears.length - 1 && (
+                            <div className="w-0.5 h-full bg-slate-200 mt-2"></div>
+                          )}
+                        </div>
+
+                        {/* Content */}
+                        <div className="flex-1 pb-8">
+                          <h3 className="text-slate-900 text-xl font-bold mb-1">Year {year}</h3>
+                          <div className="text-emerald-600 text-2xl font-bold mb-3">
+                            €{wealth.toLocaleString()}
+                          </div>
+                          <p className="text-slate-600 leading-relaxed">
+                            {description}
+                          </p>
+                        </div>
+                      </div>
+                    );
+                  });
+                })()}
+              </div>
+
+              {/* Footer */}
+              <div className="mt-8 pt-6 border-t border-slate-200">
+                <p className="text-slate-500 text-center text-sm">
+                  Designed for the Netherlands • Considers Dutch tax regulations & pension pillars
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Action Buttons */}
+          <div className="flex justify-center">
+            <button
+              onClick={() => {
+                setShowResults(false);
+                setShowQuestionnaire(false);
+              }}
+              className="flex items-center justify-center gap-2 px-6 sm:px-8 py-3 sm:py-4 bg-emerald-600 hover:bg-emerald-700 text-white font-semibold rounded-lg transition-all shadow-md text-sm sm:text-base"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+              </svg>
+              Back to Home
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Questionnaire UI
   if (showQuestionnaire) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 relative">
         {/* Loading Overlay */}
         {isSubmitting && (
-          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center">
-            <div className="bg-slate-800 border border-slate-700 rounded-2xl p-8 max-w-md mx-4 text-center">
+          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+            <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 sm:p-8 max-w-md w-full text-center">
               <div className="flex justify-center mb-4">
-                <svg className="animate-spin h-12 w-12 text-emerald-500" fill="none" viewBox="0 0 24 24">
+                <svg className="animate-spin h-10 w-10 sm:h-12 sm:w-12 text-emerald-500" fill="none" viewBox="0 0 24 24">
                   <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                 </svg>
               </div>
-              <h3 className="text-2xl font-bold text-white mb-2">Analyzing Your Financial Future</h3>
-              <div className="min-h-[4rem] flex items-center justify-center">
-                <p className="text-slate-400 text-lg transition-opacity duration-500">
+              <h3 className="text-xl sm:text-2xl font-bold text-white mb-2">Analyzing Your Financial Future</h3>
+              <div className="min-h-[4rem] flex items-center justify-center px-2">
+                <p className="text-slate-400 text-base sm:text-lg transition-opacity duration-500">
                   {loadingMessages[loadingMessageIndex]}
                 </p>
               </div>
@@ -252,9 +1269,9 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
           </div>
         )}
         
-        <div className="flex h-screen">
-          {/* Sidebar */}
-          <div className="w-64 bg-slate-900/60 border-r border-slate-800 p-6">
+        <div className="flex min-h-screen md:h-screen">
+          {/* Sidebar - Hidden on mobile */}
+          <div className="hidden md:flex md:w-64 bg-slate-900/60 border-r border-slate-800 p-6 flex-col">
             <div className="flex items-center gap-2 mb-12">
               <svg className="w-6 h-6 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M3 17l6-6 4 4 8-8M21 7v6h-6" strokeLinecap="round" strokeLinejoin="round"/>
@@ -315,12 +1332,27 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
 
           {/* Main Content */}
           <div className="flex-1 overflow-y-auto">
-            <div className="max-w-3xl mx-auto px-8 py-12">
+            <div className="max-w-3xl mx-auto px-4 sm:px-6 md:px-8 py-6 sm:py-8 md:py-12">
+              {/* Mobile Progress Indicator */}
+              <div className="md:hidden mb-6 flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <svg className="w-6 h-6 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                    <path d="M3 17l6-6 4 4 8-8M21 7v6h-6" strokeLinecap="round" strokeLinejoin="round"/>
+                  </svg>
+                  <span className="text-white font-bold">ProsperPath</span>
+                </div>
+                <div className="flex gap-1">
+                  <div className={`w-2 h-2 rounded-full ${currentStep === 'household' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
+                  <div className={`w-2 h-2 rounded-full ${currentStep === 'financials' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
+                  <div className={`w-2 h-2 rounded-full ${currentStep === 'dutchTax' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
+                  <div className={`w-2 h-2 rounded-full ${currentStep === 'realEstate' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
+                </div>
+              </div>
               {/* Household Step */}
               {currentStep === 'household' && (
                 <div>
-                  <h1 className="text-4xl font-bold text-white mb-3">Tell us about your household</h1>
-                  <p className="text-slate-400 mb-12">We'll personalize your wealth plan based on your situation.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Tell us about your household</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">We'll personalize your wealth plan based on your situation.</p>
 
                   <div className="space-y-6">
                     <div>
@@ -341,8 +1373,11 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                         value={formData.fullName}
                         onChange={(e) => updateFormData('fullName', e.target.value)}
                         placeholder="Your name"
-                        className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        className={`w-full bg-slate-800 border ${validationErrors.fullName ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                       />
+                      {validationErrors.fullName && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.fullName}</p>
+                      )}
                     </div>
 
                     <div>
@@ -351,8 +1386,11 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                         type="number"
                         value={formData.age}
                         onChange={(e) => updateFormData('age', Number(e.target.value))}
-                        className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        className={`w-full bg-slate-800 border ${validationErrors.age ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                       />
+                      {validationErrors.age && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.age}</p>
+                      )}
                     </div>
 
                     <div>
@@ -361,8 +1399,11 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                         type="number"
                         value={formData.retirementAge}
                         onChange={(e) => updateFormData('retirementAge', Number(e.target.value))}
-                        className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        className={`w-full bg-slate-800 border ${validationErrors.retirementAge ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                       />
+                      {validationErrors.retirementAge && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.retirementAge}</p>
+                      )}
                     </div>
 
                     <div className="flex items-center justify-between py-4 border-t border-b border-slate-700">
@@ -404,28 +1445,31 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                           type="number"
                           value={formData.childrenCount}
                           onChange={(e) => updateFormData('childrenCount', Number(e.target.value))}
-                          className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          className={`w-full bg-slate-800 border ${validationErrors.childrenCount ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                         />
+                        {validationErrors.childrenCount && (
+                          <p className="text-red-500 text-sm mt-1">{validationErrors.childrenCount}</p>
+                        )}
                       </div>
                     )}
                   </div>
 
-                  <div className="flex items-center justify-between mt-12">
+                  <div className="flex items-center justify-between mt-8 sm:mt-12">
                     <button
                       onClick={() => setShowQuestionnaire(false)}
-                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
+                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors text-sm sm:text-base"
                     >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
                       </svg>
                       Home
                     </button>
                     <button
                       onClick={handleContinue}
-                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-3 rounded-lg font-semibold transition-all"
+                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 sm:px-6 py-2 sm:py-3 rounded-lg font-semibold transition-all text-sm sm:text-base"
                     >
                       Continue
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                       </svg>
                     </button>
@@ -436,8 +1480,8 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
               {/* Financials Step */}
               {currentStep === 'financials' && (
                 <div>
-                  <h1 className="text-4xl font-bold text-white mb-3">Financial Overview</h1>
-                  <p className="text-slate-400 mb-12">Tell us about your income and assets.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Financial Overview</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">Tell us about your income and assets.</p>
 
                   <div className="space-y-6">
                     <div>
@@ -448,9 +1492,12 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                           type="number"
                           value={formData.grossSalary}
                           onChange={(e) => updateFormData('grossSalary', Number(e.target.value))}
-                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          className={`w-full bg-slate-800 border ${validationErrors.grossSalary ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                         />
                       </div>
+                      {validationErrors.grossSalary && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.grossSalary}</p>
+                      )}
                     </div>
 
                     <div className="flex items-center justify-between py-4 border-t border-b border-slate-700">
@@ -480,9 +1527,12 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                           type="number"
                           value={formData.savingsAmount}
                           onChange={(e) => updateFormData('savingsAmount', Number(e.target.value))}
-                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          className={`w-full bg-slate-800 border ${validationErrors.savingsAmount ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                         />
                       </div>
+                      {validationErrors.savingsAmount && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.savingsAmount}</p>
+                      )}
                     </div>
 
                     <div>
@@ -493,9 +1543,12 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                           type="number"
                           value={formData.investmentAmount}
                           onChange={(e) => updateFormData('investmentAmount', Number(e.target.value))}
-                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          className={`w-full bg-slate-800 border ${validationErrors.investmentAmount ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                         />
                       </div>
+                      {validationErrors.investmentAmount && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.investmentAmount}</p>
+                      )}
                     </div>
 
                     <div>
@@ -506,28 +1559,31 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                           type="number"
                           value={formData.debtAmount}
                           onChange={(e) => updateFormData('debtAmount', Number(e.target.value))}
-                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          className={`w-full bg-slate-800 border ${validationErrors.debtAmount ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                         />
                       </div>
+                      {validationErrors.debtAmount && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.debtAmount}</p>
+                      )}
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between mt-12">
+                  <div className="flex items-center justify-between mt-8 sm:mt-12">
                     <button
                       onClick={handleBack}
-                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
+                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors text-sm sm:text-base"
                     >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
                       </svg>
                       Back
                     </button>
                     <button
                       onClick={handleContinue}
-                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-3 rounded-lg font-semibold transition-all"
+                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 sm:px-6 py-2 sm:py-3 rounded-lg font-semibold transition-all text-sm sm:text-base"
                     >
                       Continue
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                       </svg>
                     </button>
@@ -538,8 +1594,8 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
               {/* Dutch Tax Step */}
               {currentStep === 'dutchTax' && (
                 <div>
-                  <h1 className="text-4xl font-bold text-white mb-3">Dutch Tax Parameters</h1>
-                  <p className="text-slate-400 mb-12">Help us optimize your tax situation.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Dutch Tax Parameters</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">Help us optimize your tax situation.</p>
 
                   <div className="space-y-6">
                     <div>
@@ -550,10 +1606,13 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                           type="number"
                           value={formData.jaarruimte}
                           onChange={(e) => updateFormData('jaarruimte', Number(e.target.value))}
-                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          className={`w-full bg-slate-800 border ${validationErrors.jaarruimte ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                         />
                       </div>
                       <p className="text-slate-400 text-sm mt-2">Amount you can contribute to private pension for tax deduction</p>
+                      {validationErrors.jaarruimte && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.jaarruimte}</p>
+                      )}
                     </div>
 
                     <div>
@@ -564,29 +1623,32 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                           type="number"
                           value={formData.factorA}
                           onChange={(e) => updateFormData('factorA', Number(e.target.value))}
-                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          className={`w-full bg-slate-800 border ${validationErrors.factorA ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                         />
                       </div>
                       <p className="text-slate-400 text-sm mt-2">Annual pension accrual from employer (if applicable)</p>
+                      {validationErrors.factorA && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.factorA}</p>
+                      )}
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between mt-12">
+                  <div className="flex items-center justify-between mt-8 sm:mt-12">
                     <button
                       onClick={handleBack}
-                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
+                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors text-sm sm:text-base"
                     >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
                       </svg>
                       Back
                     </button>
                     <button
                       onClick={handleContinue}
-                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-3 rounded-lg font-semibold transition-all"
+                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 sm:px-6 py-2 sm:py-3 rounded-lg font-semibold transition-all text-sm sm:text-base"
                     >
                       Continue
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                       </svg>
                     </button>
@@ -597,8 +1659,8 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
               {/* Real Estate Step */}
               {currentStep === 'realEstate' && (
                 <div>
-                  <h1 className="text-4xl font-bold text-white mb-3">Real Estate & Housing</h1>
-                  <p className="text-slate-400 mb-12">Tell us about your primary residence.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Real Estate & Housing</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">Tell us about your primary residence.</p>
 
                   <div className="space-y-6">
                     <div>
@@ -609,9 +1671,12 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                           type="number"
                           value={formData.homeValue}
                           onChange={(e) => updateFormData('homeValue', Number(e.target.value))}
-                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          className={`w-full bg-slate-800 border ${validationErrors.homeValue ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                         />
                       </div>
+                      {validationErrors.homeValue && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.homeValue}</p>
+                      )}
                     </div>
 
                     <div>
@@ -622,9 +1687,12 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                           type="number"
                           value={formData.mortgageBalance}
                           onChange={(e) => updateFormData('mortgageBalance', Number(e.target.value))}
-                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          className={`w-full bg-slate-800 border ${validationErrors.mortgageBalance ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                         />
                       </div>
+                      {validationErrors.mortgageBalance && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageBalance}</p>
+                      )}
                     </div>
 
                     <div>
@@ -635,10 +1703,13 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                           step="0.1"
                           value={formData.mortgageInterestRate}
                           onChange={(e) => updateFormData('mortgageInterestRate', Number(e.target.value))}
-                          className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          className={`w-full bg-slate-800 border ${validationErrors.mortgageInterestRate ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                         />
                         <span className="absolute right-4 top-3 text-slate-400">%</span>
                       </div>
+                      {validationErrors.mortgageInterestRate && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageInterestRate}</p>
+                      )}
                     </div>
 
                     <div>
@@ -647,18 +1718,21 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                         type="number"
                         value={formData.mortgageYearsLeft}
                         onChange={(e) => updateFormData('mortgageYearsLeft', Number(e.target.value))}
-                        className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        className={`w-full bg-slate-800 border ${validationErrors.mortgageYearsLeft ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                       />
+                      {validationErrors.mortgageYearsLeft && (
+                        <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageYearsLeft}</p>
+                      )}
                     </div>
                   </div>
 
-                  <div className="flex items-center justify-between mt-12">
+                  <div className="flex items-center justify-between mt-8 sm:mt-12">
                     <button
                       onClick={handleBack}
                       disabled={isSubmitting}
-                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed text-sm sm:text-base"
                     >
-                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
                       </svg>
                       Back
@@ -666,7 +1740,7 @@ Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs inve
                     <button
                       onClick={handleContinue}
                       disabled={isSubmitting}
-                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-3 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 sm:px-6 py-2 sm:py-3 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed text-sm sm:text-base"
                     >
                       {isSubmitting ? (
                         <>
