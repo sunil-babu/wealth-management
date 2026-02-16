@@ -47,6 +47,13 @@ app.use(helmet());
 app.use(express.json({ limit: '10kb' }));
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1d' }));
 
+// Increase timeout for long-running AI requests
+app.use((req, res, next) => {
+  req.setTimeout(360000); // 6 minutes
+  res.setTimeout(360000); // 6 minutes
+  next();
+});
+
 // CORS for AI service integration
 app.use((req, res, next) => {
   res.header('Access-Control-Allow-Origin', '*');
@@ -126,7 +133,7 @@ app.post('/api/vertex', async (req, res) => {
     }
 
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 30000); // 30s timeout
+    const timeout = setTimeout(() => controller.abort(), 300000); // 5 minutes timeout for Gemini
 
     // Check if using Gemini model (requires different API format)
     const isGeminiModel = vertexUrl.includes('gemini');
@@ -141,21 +148,39 @@ app.post('/api/vertex', async (req, res) => {
         contents: [{
           role: 'user',
           parts: [{ text: req.body.prompt }]
-        }]
+        }],
+        generationConfig: {
+          temperature: 0.7,
+          topP: 0.8,
+          topK: 40,
+          maxOutputTokens: 2048, // Limit response length to improve speed
+          candidateCount: 1
+        },
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' }
+        ]
       };
 
       console.log('Calling Gemini API with URL:', geminiUrl);
-      console.log('Gemini body:', JSON.stringify(geminiBody));
+      console.log('Gemini body:', JSON.stringify(geminiBody, null, 2));
 
       resp = await fetch(geminiUrl, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${token}`,
+          'Connection': 'keep-alive',
+          'Keep-Alive': 'timeout=360'
         },
         body: JSON.stringify(geminiBody),
         signal: controller.signal
       });
+      
+      console.log('Response status:', resp.status);
+      console.log('Response headers:', Object.fromEntries(resp.headers.entries()));
     } else {
       // Standard Vertex Predict API (for text-bison, etc.)
       const vertexBody = {
@@ -170,31 +195,49 @@ app.post('/api/vertex', async (req, res) => {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
+          'Authorization': `Bearer ${token}`,
+          'Connection': 'keep-alive',
+          'Keep-Alive': 'timeout=360'
         },
         body: JSON.stringify(vertexBody),
         signal: controller.signal
       });
+      
+      console.log('Response status:', resp.status);
+      console.log('Response headers:', Object.fromEntries(resp.headers.entries()));
     }
     
     clearTimeout(timeout);
+    console.log('Request completed, timeout cleared');
 
     if (!resp.ok) {
       const errText = await resp.text();
+      console.log('Vertex API error response:', errText);
       log.error('Vertex API error', { requestId, status: resp.status, error: errText });
-      return res.status(resp.status).json({ error: 'AI service error' });
+      return res.status(resp.status).json({ error: 'AI service error', details: errText });
     }
 
+    console.log('Parsing JSON response...');
     const data = await resp.json();
+    console.log('JSON parsed successfully');
+    console.log('Vertex API success response:', JSON.stringify(data, null, 2));
     log.info('AI response sent', { requestId, responseSize: JSON.stringify(data).length });
+    
+    // Send response back to client
     res.status(200).json(data);
+    console.log('Response sent to client successfully');
   } catch (err) {
+    console.log('Error caught:', err.name, err.message);
     if (err.name === 'AbortError') {
       log.warn('Request timeout', { requestId });
-      return res.status(504).json({ error: 'AI request timeout' });
+      return res.status(504).json({ error: 'Request timed out after 5 minutes. The AI service may be processing a complex analysis. Please try again.' });
     }
-    log.error('Unexpected error', { requestId, message: err.message });
-    res.status(500).json({ error: 'Internal server error' });
+    if (err.message.includes('fetch')) {
+      log.error('Network error', { requestId, message: err.message });
+      return res.status(503).json({ error: 'Network error connecting to AI service. Please try again.' });
+    }
+    log.error('Unexpected error', { requestId, message: err.message, stack: err.stack });
+    res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });
 

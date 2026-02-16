@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useState, useEffect } from 'react'
 import { translations } from './translations'
 
 export default function App() {
@@ -12,6 +12,63 @@ export default function App() {
   const [expectedReturn, setExpectedReturn] = useState(9);
   const [realEstate, setRealEstate] = useState(0);
   const [mortgage, setMortgage] = useState(0);
+
+  // Questionnaire state
+  const [showQuestionnaire, setShowQuestionnaire] = useState(false);
+  const [currentStep, setCurrentStep] = useState('household');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
+
+  // Loading messages to keep users engaged
+  const loadingMessages = [
+    "Scanning 2026 Dutch Tax Law... Every day you wait is a day of missed compounding.",
+    "Checking for 'wealth leaks'... You might be losing up to 2% of your net worth to inflation right now.",
+    "Calculating your 'Tax Drag'... Don't let Box 3 eat your retirement before it even starts.",
+    "Analyzing your mortgage... Is your bank getting richer while your freedom date stays the same?",
+    "Finding the money you're leaving on the table...",
+    "Reviewing your Box 3 assets for optimization opportunities...",
+    "Comparing 2026 vs 2028 tax scenarios... The new rules change everything.",
+    "Building your personalized wealth exit strategy...",
+    "Calculating compound interest on your discovered savings...",
+    "Your financial freedom date is about to be revealed..."
+  ];
+
+  // Cycle through loading messages every 4 seconds
+  useEffect(() => {
+    let interval;
+    if (isSubmitting) {
+      interval = setInterval(() => {
+        setLoadingMessageIndex((prev) => (prev + 1) % loadingMessages.length);
+      }, 4000);
+    }
+    return () => clearInterval(interval);
+  }, [isSubmitting, loadingMessages.length]);
+  
+  // Form data
+  const [formData, setFormData] = useState({
+    // Household
+    fullName: '',
+    age: 30,
+    retirementAge: 67,
+    country: 'Netherlands',
+    hasSpouse: false,
+    hasChildren: false,
+    childrenCount: 0,
+    // Financials
+    grossSalary: 60000,
+    has30PercentRuling: false,
+    savingsAmount: 90000,
+    investmentAmount: 150000,
+    debtAmount: 0,
+    // Dutch Tax
+    jaarruimte: 0,
+    factorA: 0,
+    // Real Estate
+    homeValue: 0,
+    mortgageBalance: 0,
+    mortgageInterestRate: 0,
+    mortgageYearsLeft: 0
+  });
 
   const t = translations[language];
 
@@ -65,6 +122,578 @@ export default function App() {
   const currentTax = calculateCurrentTax();
   const newTax = calculateNewTax();
   const difference = newTax - currentTax;
+
+  // Form handling
+  const updateFormData = (field, value) => {
+    setFormData(prev => ({ ...prev, [field]: value }));
+  };
+
+  const handleGetStarted = () => {
+    setShowQuestionnaire(true);
+    setCurrentStep('household');
+  };
+
+  const handleContinue = async () => {
+    if (currentStep === 'household') {
+      setCurrentStep('financials');
+    } else if (currentStep === 'financials') {
+      setCurrentStep('dutchTax');
+    } else if (currentStep === 'dutchTax') {
+      setCurrentStep('realEstate');
+    } else if (currentStep === 'realEstate') {
+      // Submit to Vertex AI
+      await submitToVertexAI();
+    }
+  };
+
+  const handleBack = () => {
+    if (currentStep === 'financials') {
+      setCurrentStep('household');
+    } else if (currentStep === 'dutchTax') {
+      setCurrentStep('financials');
+    } else if (currentStep === 'realEstate') {
+      setCurrentStep('dutchTax');
+    }
+  };
+
+  const submitToVertexAI = async () => {
+    const prompt = `Act as a Dutch wealth management advisor. Analyze this household and provide 3-5 key recommendations:
+
+HOUSEHOLD: Age ${formData.age}, Retiring ${formData.retirementAge}, ${formData.hasSpouse ? 'Partnered' : 'Single'}, ${formData.hasChildren ? formData.childrenCount + ' children' : 'No children'}
+
+INCOME: €${formData.grossSalary}/year, 30% Ruling: ${formData.has30PercentRuling ? 'Yes' : 'No'}
+
+BOX 3 ASSETS: Savings €${formData.savingsAmount}, Investments €${formData.investmentAmount}, Debt €${formData.debtAmount}
+
+REAL ESTATE: Home €${formData.homeValue}, Mortgage €${formData.mortgageBalance} at ${formData.mortgageInterestRate}% for ${formData.mortgageYearsLeft} years
+
+Focus on: 1) Box 3 tax optimization 2) Pension contributions 3) Mortgage vs investment strategy 4) Timeline to financial freedom. Keep response under 500 words.`;
+
+    setIsSubmitting(true);
+    setLoadingMessageIndex(0);
+    
+    try {
+      // Create abort controller for client-side timeout
+      const abortController = new AbortController();
+      const timeoutId = setTimeout(() => abortController.abort(), 360000); // 6 minutes client timeout
+
+      // Send to backend which will call Vertex AI
+      const response = await fetch('/api/vertex', {
+        method: 'POST',
+        headers: { 
+          'Content-Type': 'application/json',
+          'Connection': 'keep-alive'
+        },
+        body: JSON.stringify({ prompt }),
+        signal: abortController.signal,
+        keepalive: true
+      });
+
+      clearTimeout(timeoutId);
+
+      const result = await response.json();
+      
+      if (!response.ok) {
+        const errorMsg = result.error || result.details || `HTTP error! status: ${response.status}`;
+        throw new Error(errorMsg);
+      }
+
+      console.log('Vertex AI Response:', result);
+      
+      // Close questionnaire and show results
+      setShowQuestionnaire(false);
+      setIsSubmitting(false);
+      alert(`Analysis complete! Your personalized wealth strategy has been generated.\n\nName: ${formData.fullName}\nAge: ${formData.age}\nRetirement Age: ${formData.retirementAge}\n\nCheck the console for detailed recommendations.`);
+    } catch (error) {
+      console.error('Error submitting to Vertex AI:', error);
+      setIsSubmitting(false);
+      
+      // Better error messages based on error type
+      let errorMessage = 'Error processing your request.\n\n';
+      
+      if (error.name === 'AbortError') {
+        errorMessage += 'Request timed out after 6 minutes. The AI service may be overloaded.\n\nPlease try again in a few moments.';
+      } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
+        errorMessage += 'Network connection error. Please check your internet connection and try again.';
+      } else {
+        errorMessage += `${error.message}\n\nIf this persists, the AI service may be experiencing high demand.`;
+      }
+      
+      alert(errorMessage);
+    }
+  };
+
+  // Questionnaire UI
+  if (showQuestionnaire) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 relative">
+        {/* Loading Overlay */}
+        {isSubmitting && (
+          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center">
+            <div className="bg-slate-800 border border-slate-700 rounded-2xl p-8 max-w-md mx-4 text-center">
+              <div className="flex justify-center mb-4">
+                <svg className="animate-spin h-12 w-12 text-emerald-500" fill="none" viewBox="0 0 24 24">
+                  <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                  <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                </svg>
+              </div>
+              <h3 className="text-2xl font-bold text-white mb-2">Analyzing Your Financial Future</h3>
+              <div className="min-h-[4rem] flex items-center justify-center">
+                <p className="text-slate-400 text-lg transition-opacity duration-500">
+                  {loadingMessages[loadingMessageIndex]}
+                </p>
+              </div>
+              <div className="mt-6 flex items-center justify-center gap-2">
+                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse"></div>
+                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" style={{animationDelay: '0.2s'}}></div>
+                <div className="w-2 h-2 bg-emerald-500 rounded-full animate-pulse" style={{animationDelay: '0.4s'}}></div>
+              </div>
+            </div>
+          </div>
+        )}
+        
+        <div className="flex h-screen">
+          {/* Sidebar */}
+          <div className="w-64 bg-slate-900/60 border-r border-slate-800 p-6">
+            <div className="flex items-center gap-2 mb-12">
+              <svg className="w-6 h-6 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M3 17l6-6 4 4 8-8M21 7v6h-6" strokeLinecap="round" strokeLinejoin="round"/>
+              </svg>
+              <span className="text-lg font-bold text-white">ProsperPath</span>
+            </div>
+
+            <nav className="space-y-2">
+              <button
+                onClick={() => setCurrentStep('household')}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                  currentStep === 'household' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                }`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
+                </svg>
+                <span className="font-medium">Household</span>
+              </button>
+
+              <button
+                onClick={() => setCurrentStep('financials')}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                  currentStep === 'financials' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                }`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="font-medium">Financials</span>
+              </button>
+
+              <button
+                onClick={() => setCurrentStep('dutchTax')}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                  currentStep === 'dutchTax' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                }`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                </svg>
+                <span className="font-medium">Dutch Tax</span>
+              </button>
+
+              <button
+                onClick={() => setCurrentStep('realEstate')}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                  currentStep === 'realEstate' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                }`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+                </svg>
+                <span className="font-medium">Real Estate</span>
+              </button>
+            </nav>
+          </div>
+
+          {/* Main Content */}
+          <div className="flex-1 overflow-y-auto">
+            <div className="max-w-3xl mx-auto px-8 py-12">
+              {/* Household Step */}
+              {currentStep === 'household' && (
+                <div>
+                  <h1 className="text-4xl font-bold text-white mb-3">Tell us about your household</h1>
+                  <p className="text-slate-400 mb-12">We'll personalize your wealth plan based on your situation.</p>
+
+                  <div className="space-y-6">
+                    <div>
+                      <label className="block text-white font-medium mb-2">Country of Residence</label>
+                      <select
+                        value={formData.country}
+                        onChange={(e) => updateFormData('country', e.target.value)}
+                        className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      >
+                        <option value="Netherlands">🇳🇱 Netherlands</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="block text-white font-medium mb-2">Full Name</label>
+                      <input
+                        type="text"
+                        value={formData.fullName}
+                        onChange={(e) => updateFormData('fullName', e.target.value)}
+                        placeholder="Your name"
+                        className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-white font-medium mb-2">Age</label>
+                      <input
+                        type="number"
+                        value={formData.age}
+                        onChange={(e) => updateFormData('age', Number(e.target.value))}
+                        className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      />
+                    </div>
+
+                    <div>
+                      <label className="block text-white font-medium mb-2">Target Retirement Age</label>
+                      <input
+                        type="number"
+                        value={formData.retirementAge}
+                        onChange={(e) => updateFormData('retirementAge', Number(e.target.value))}
+                        className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      />
+                    </div>
+
+                    <div className="flex items-center justify-between py-4 border-t border-b border-slate-700">
+                      <span className="text-white font-medium">Add Spouse</span>
+                      <button
+                        onClick={() => updateFormData('hasSpouse', !formData.hasSpouse)}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          formData.hasSpouse ? 'bg-emerald-500' : 'bg-slate-600'
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            formData.hasSpouse ? 'translate-x-6' : 'translate-x-1'
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    <div className="flex items-center justify-between py-4 border-b border-slate-700">
+                      <span className="text-white font-medium">Have Children</span>
+                      <button
+                        onClick={() => updateFormData('hasChildren', !formData.hasChildren)}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          formData.hasChildren ? 'bg-emerald-500' : 'bg-slate-600'
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            formData.hasChildren ? 'translate-x-6' : 'translate-x-1'
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    {formData.hasChildren && (
+                      <div>
+                        <label className="block text-white font-medium mb-2">Number of Children</label>
+                        <input
+                          type="number"
+                          value={formData.childrenCount}
+                          onChange={(e) => updateFormData('childrenCount', Number(e.target.value))}
+                          className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="flex items-center justify-between mt-12">
+                    <button
+                      onClick={() => setShowQuestionnaire(false)}
+                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                      </svg>
+                      Home
+                    </button>
+                    <button
+                      onClick={handleContinue}
+                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-3 rounded-lg font-semibold transition-all"
+                    >
+                      Continue
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Financials Step */}
+              {currentStep === 'financials' && (
+                <div>
+                  <h1 className="text-4xl font-bold text-white mb-3">Financial Overview</h1>
+                  <p className="text-slate-400 mb-12">Tell us about your income and assets.</p>
+
+                  <div className="space-y-6">
+                    <div>
+                      <label className="block text-white font-medium mb-2">Annual Gross Salary (Box 1)</label>
+                      <div className="relative">
+                        <span className="absolute left-4 top-3 text-slate-400">€</span>
+                        <input
+                          type="number"
+                          value={formData.grossSalary}
+                          onChange={(e) => updateFormData('grossSalary', Number(e.target.value))}
+                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div className="flex items-center justify-between py-4 border-t border-b border-slate-700">
+                      <div>
+                        <span className="text-white font-medium block">30% Ruling Status</span>
+                        <span className="text-slate-400 text-sm">Are you eligible for the 30% ruling?</span>
+                      </div>
+                      <button
+                        onClick={() => updateFormData('has30PercentRuling', !formData.has30PercentRuling)}
+                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                          formData.has30PercentRuling ? 'bg-emerald-500' : 'bg-slate-600'
+                        }`}
+                      >
+                        <span
+                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                            formData.has30PercentRuling ? 'translate-x-6' : 'translate-x-1'
+                          }`}
+                        />
+                      </button>
+                    </div>
+
+                    <div>
+                      <label className="block text-white font-medium mb-2">Savings / Bank Balance (Box 3)</label>
+                      <div className="relative">
+                        <span className="absolute left-4 top-3 text-slate-400">€</span>
+                        <input
+                          type="number"
+                          value={formData.savingsAmount}
+                          onChange={(e) => updateFormData('savingsAmount', Number(e.target.value))}
+                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-white font-medium mb-2">Investments (Stocks, ETFs, Crypto)</label>
+                      <div className="relative">
+                        <span className="absolute left-4 top-3 text-slate-400">€</span>
+                        <input
+                          type="number"
+                          value={formData.investmentAmount}
+                          onChange={(e) => updateFormData('investmentAmount', Number(e.target.value))}
+                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-white font-medium mb-2">Total Debt (Non-Mortgage)</label>
+                      <div className="relative">
+                        <span className="absolute left-4 top-3 text-slate-400">€</span>
+                        <input
+                          type="number"
+                          value={formData.debtAmount}
+                          onChange={(e) => updateFormData('debtAmount', Number(e.target.value))}
+                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between mt-12">
+                    <button
+                      onClick={handleBack}
+                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                      </svg>
+                      Back
+                    </button>
+                    <button
+                      onClick={handleContinue}
+                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-3 rounded-lg font-semibold transition-all"
+                    >
+                      Continue
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Dutch Tax Step */}
+              {currentStep === 'dutchTax' && (
+                <div>
+                  <h1 className="text-4xl font-bold text-white mb-3">Dutch Tax Parameters</h1>
+                  <p className="text-slate-400 mb-12">Help us optimize your tax situation.</p>
+
+                  <div className="space-y-6">
+                    <div>
+                      <label className="block text-white font-medium mb-2">Jaarruimte (Pillar 3 Pension Room)</label>
+                      <div className="relative">
+                        <span className="absolute left-4 top-3 text-slate-400">€</span>
+                        <input
+                          type="number"
+                          value={formData.jaarruimte}
+                          onChange={(e) => updateFormData('jaarruimte', Number(e.target.value))}
+                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                      </div>
+                      <p className="text-slate-400 text-sm mt-2">Amount you can contribute to private pension for tax deduction</p>
+                    </div>
+
+                    <div>
+                      <label className="block text-white font-medium mb-2">Factor A (Employer Pension)</label>
+                      <div className="relative">
+                        <span className="absolute left-4 top-3 text-slate-400">€</span>
+                        <input
+                          type="number"
+                          value={formData.factorA}
+                          onChange={(e) => updateFormData('factorA', Number(e.target.value))}
+                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                      </div>
+                      <p className="text-slate-400 text-sm mt-2">Annual pension accrual from employer (if applicable)</p>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between mt-12">
+                    <button
+                      onClick={handleBack}
+                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                      </svg>
+                      Back
+                    </button>
+                    <button
+                      onClick={handleContinue}
+                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-3 rounded-lg font-semibold transition-all"
+                    >
+                      Continue
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Real Estate Step */}
+              {currentStep === 'realEstate' && (
+                <div>
+                  <h1 className="text-4xl font-bold text-white mb-3">Real Estate & Housing</h1>
+                  <p className="text-slate-400 mb-12">Tell us about your primary residence.</p>
+
+                  <div className="space-y-6">
+                    <div>
+                      <label className="block text-white font-medium mb-2">Primary Residence Value (WOZ-waarde)</label>
+                      <div className="relative">
+                        <span className="absolute left-4 top-3 text-slate-400">€</span>
+                        <input
+                          type="number"
+                          value={formData.homeValue}
+                          onChange={(e) => updateFormData('homeValue', Number(e.target.value))}
+                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-white font-medium mb-2">Current Mortgage Balance</label>
+                      <div className="relative">
+                        <span className="absolute left-4 top-3 text-slate-400">€</span>
+                        <input
+                          type="number"
+                          value={formData.mortgageBalance}
+                          onChange={(e) => updateFormData('mortgageBalance', Number(e.target.value))}
+                          className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-white font-medium mb-2">Mortgage Interest Rate (%)</label>
+                      <div className="relative">
+                        <input
+                          type="number"
+                          step="0.1"
+                          value={formData.mortgageInterestRate}
+                          onChange={(e) => updateFormData('mortgageInterestRate', Number(e.target.value))}
+                          className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                        />
+                        <span className="absolute right-4 top-3 text-slate-400">%</span>
+                      </div>
+                    </div>
+
+                    <div>
+                      <label className="block text-white font-medium mb-2">Remaining Mortgage Term (Years)</label>
+                      <input
+                        type="number"
+                        value={formData.mortgageYearsLeft}
+                        onChange={(e) => updateFormData('mortgageYearsLeft', Number(e.target.value))}
+                        className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                      />
+                    </div>
+                  </div>
+
+                  <div className="flex items-center justify-between mt-12">
+                    <button
+                      onClick={handleBack}
+                      disabled={isSubmitting}
+                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                      </svg>
+                      Back
+                    </button>
+                    <button
+                      onClick={handleContinue}
+                      disabled={isSubmitting}
+                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-6 py-3 rounded-lg font-semibold transition-all disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                      {isSubmitting ? (
+                        <>
+                          <svg className="animate-spin h-5 w-5" fill="none" viewBox="0 0 24 24">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          Analyzing (up to 5 min)...
+                        </>
+                      ) : (
+                        <>
+                          Submit & Analyze
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                          </svg>
+                        </>
+                      )}
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
@@ -135,7 +764,10 @@ export default function App() {
                 )}
               </div>
               
-              <button className="bg-emerald-500 hover:bg-emerald-600 text-white font-medium px-3 sm:px-6 py-2 rounded-lg transition-colors text-sm sm:text-base whitespace-nowrap">
+              <button 
+                onClick={handleGetStarted}
+                className="bg-emerald-500 hover:bg-emerald-600 text-white font-medium px-3 sm:px-6 py-2 rounded-lg transition-colors text-sm sm:text-base whitespace-nowrap"
+              >
                 <span className="hidden sm:inline">{t.nav.getStarted}</span>
                 <span className="sm:hidden">Start</span>
               </button>
@@ -663,7 +1295,10 @@ export default function App() {
                 </li>
               </ul>
 
-              <button className="w-full bg-slate-700 hover:bg-slate-600 text-white font-semibold py-3 px-6 rounded-xl transition-all">
+              <button 
+                onClick={handleGetStarted}
+                className="w-full bg-slate-700 hover:bg-slate-600 text-white font-semibold py-3 px-6 rounded-xl transition-all"
+              >
                 {t.pricing.btnGetStarted}
               </button>
             </div>
@@ -729,7 +1364,10 @@ export default function App() {
                 </li>
               </ul>
 
-              <button className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-lg hover:shadow-emerald-500/50">
+              <button 
+                onClick={handleGetStarted}
+                className="w-full bg-emerald-500 hover:bg-emerald-600 text-white font-semibold py-3 px-6 rounded-xl transition-all shadow-lg hover:shadow-emerald-500/50"
+              >
                 {t.pricing.btnUnlock}
               </button>
             </div>
