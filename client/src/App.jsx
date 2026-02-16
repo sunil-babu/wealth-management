@@ -6,11 +6,31 @@ export default function App() {
   const [showLangDropdown, setShowLangDropdown] = useState(false);
   const [preset, setPreset] = useState('growing');
   
-  // Financial inputs
-  const [savings, setSavings] = useState(90000);
-  const [investments, setInvestments] = useState(150000);
+  // Detailed Financial Inputs
+  // Bank & Savings
+  const [savingsBalance, setSavingsBalance] = useState(30000);
+  const [interestEarned, setInterestEarned] = useState(900);
+  
+  // Stocks & Crypto
+  const [cryptoValueJan1, setCryptoValueJan1] = useState(20000);
+  const [cryptoValueDec31, setCryptoValueDec31] = useState(50000);
+  const [dividendsReceived, setDividendsReceived] = useState(2000);
+  
+  // Real Estate
+  const [propertyValue, setPropertyValue] = useState(500000);
+  const [rentalIncome, setRentalIncome] = useState(0);
+  const [saleProceeds, setSaleProceeds] = useState(0);
+  const [purchasePrice, setPurchasePrice] = useState(400000);
+  
+  // Deductions & Losses
+  const [debtInterest, setDebtInterest] = useState(0);
+  const [priorYearLoss, setPriorYearLoss] = useState(0);
+  
+  // Legacy (for compatibility)
+  const [savings, setSavings] = useState(30000);
+  const [investments, setInvestments] = useState(70000);
   const [expectedReturn, setExpectedReturn] = useState(9);
-  const [realEstate, setRealEstate] = useState(0);
+  const [realEstate, setRealEstate] = useState(500000);
   const [mortgage, setMortgage] = useState(0);
 
   // Questionnaire state
@@ -49,6 +69,10 @@ export default function App() {
   });
   const [recommendedProducts, setRecommendedProducts] = useState([]);
 
+  // Tax comparison expand/collapse state
+  const [expandTax2024, setExpandTax2024] = useState(false);
+  const [expandTax2028, setExpandTax2028] = useState(false);
+
   // Loading messages to keep users engaged
   const loadingMessages = [
     "Scanning 2026 Dutch Tax Law... Every day you wait is a day of missed compounding.",
@@ -74,7 +98,7 @@ export default function App() {
     return () => clearInterval(interval);
   }, [isSubmitting, loadingMessages.length]);
   
-  // Form data
+  // Form data with detailed financial breakdown
   const [formData, setFormData] = useState({
     // Household
     fullName: '',
@@ -84,16 +108,32 @@ export default function App() {
     hasSpouse: false,
     hasChildren: false,
     childrenCount: 0,
-    // Financials
+    // Financials (legacy)
     grossSalary: 60000,
     has30PercentRuling: false,
     savingsAmount: 90000,
     investmentAmount: 150000,
     debtAmount: 0,
+    // Bank & Savings (detailed)
+    savingsBalance: 30000,
+    interestEarned: 900,
+    // Stocks & Crypto (detailed)
+    cryptoValueJan1: 20000,
+    cryptoValueDec31: 50000,
+    dividendsReceived: 2000,
+    // Real Estate (detailed)
+    propertyValue: 500000,
+    rentalIncome: 0,
+    saleProceeds: 0,
+    purchasePrice: 400000,
+    // Deductions
+    debtInterest: 0,
+    // Loss Carry-Forward
+    priorYearLoss: 0,
     // Dutch Tax
     jaarruimte: 0,
     factorA: 0,
-    // Real Estate
+    // Real Estate (legacy)
     homeValue: 0,
     mortgageBalance: 0,
     mortgageInterestRate: 0,
@@ -119,43 +159,143 @@ export default function App() {
     setMortgage(p.mortgage);
   };
 
-  // Calculate net worth
-  const totalAssets = savings + investments + realEstate;
-  const netWorth = totalAssets - mortgage;
+  // Calculate net worth from detailed inputs
+  const totalAssets = savingsBalance + cryptoValueDec31 + propertyValue;
+  const netWorth = totalAssets;
 
-  // Tax-free allowance
+  // Tax-free allowance (2024/2025)
   const taxFreeAllowance = 57000;
 
-  // Current System (2024) - Fictional Return
-  const calculateCurrentTax = () => {
-    const taxableBase = Math.max(0, netWorth - taxFreeAllowance);
-    const fictionalReturn = 0.0624; // 6.24%
-    const assumedReturn = taxableBase * fictionalReturn;
-    const taxDue = assumedReturn * 0.36;
-    return taxDue;
+  // ===== 2024 SYSTEM (Fictional/Notional Yield) =====
+  const calculate2024TaxDetails = () => {
+    // === 2024 FICTIONAL YIELD SYSTEM ===
+    // Use Jan 1 asset values to calculate notional returns
+    const assetsJan1 = savingsBalance + cryptoValueJan1 + propertyValue;
+    
+    // Step 1: Calculate total notional return using official 2024 rates
+    const savingsNotionalReturn = savingsBalance * 0.0103; // 1.03% for savings
+    const investmentAndOtherReturn = (cryptoValueJan1 + propertyValue) * 0.0604; // 6.04% for investments & other
+    const totalNotionalReturn = savingsNotionalReturn + investmentAndOtherReturn;
+    
+    // Step 2: Calculate effective yield rate
+    const effectiveYield = assetsJan1 > 0 ? totalNotionalReturn / assetsJan1 : 0;
+    
+    // Step 3: Determine taxable basis (total assets minus tax-free allowance)
+    const taxableBase = Math.max(0, assetsJan1 - 57000); // €57,000 tax-free allowance
+    
+    // Step 4: Calculate final tax (taxable basis × effective yield × 36%)
+    const taxDue = taxableBase * effectiveYield * 0.36;
+    
+    return {
+      assetsJan1,
+      savingsBalance,
+      cryptoValueJan1,
+      propertyValue,
+      totalAssets: assetsJan1,
+      savingsNotionalReturn,
+      investmentAndOtherReturn,
+      totalNotionalReturn,
+      effectiveYield,
+      taxFreeAllowance: 57000,
+      taxableBase,
+      taxDue: Math.max(0, Math.round(taxDue))
+    };
   };
 
-  // New System (2028) - Actual Return
-  const calculateNewTax = () => {
-    const taxableBase = Math.max(0, netWorth - taxFreeAllowance);
-    const actualReturn = expectedReturn / 100;
-    const netActualReturn = taxableBase * actualReturn;
-    
-    if (netActualReturn <= 0) {
-      return 0;
-    }
-    
-    const taxDue = netActualReturn * 0.36;
-    return taxDue;
+  const calculate2024Tax = () => {
+    return calculate2024TaxDetails().taxDue;
   };
 
-  const currentTax = calculateCurrentTax();
-  const newTax = calculateNewTax();
+  // ===== 2028 SYSTEM (Actual Returns) =====
+  const calculate2028TaxDetails = () => {
+    // Step 1: Sum total actual profit (direct income + value growth)
+    const interestIncome = interestEarned; // Interest is taxed
+    const dividendIncome = dividendsReceived; // Dividends are taxed
+    const unrealizedCryptoGain = cryptoValueDec31 - cryptoValueJan1; // Unrealized gains are taxed
+    const rentalIncomeAmount = rentalIncome; // Rental income is taxed
+    // Property value gain NOT taxed annually (only upon sale)
+    
+    const totalActualProfit = interestIncome + dividendIncome + unrealizedCryptoGain + rentalIncomeAmount;
+    
+    // Step 2: Apply deductions (interest paid on debts, prior year losses)
+    const netProfit = totalActualProfit - debtInterest - priorYearLoss;
+    
+    // Step 3: Apply €1,800 tax-free income threshold
+    const taxFreeThreshold = 1800;
+    const taxableProfit = Math.max(0, netProfit - taxFreeThreshold);
+    
+    // Step 4: Apply 36% tax
+    const taxDue = taxableProfit * 0.36;
+    
+    // Calculate cash income for liquidity ratio
+    const directCashIncome = interestIncome + dividendIncome + rentalIncomeAmount;
+    const liquidityRatio = directCashIncome > 0 ? (taxDue / directCashIncome) * 100 : 0;
+    
+    return {
+      interestIncome,
+      dividendIncome,
+      unrealizedCryptoGain,
+      rentalIncomeAmount,
+      totalActualProfit,
+      debtInterest,
+      priorYearLoss,
+      netProfit,
+      taxFreeThreshold,
+      taxableProfit,
+      directCashIncome,
+      liquidityRatio,
+      taxDue: Math.max(0, Math.round(taxDue))
+    };
+  };
+
+  const calculate2028Tax = () => {
+    return calculate2028TaxDetails().taxDue;
+  };
+
+  // ===== 2024 COUNTER-EVIDENCE OPPORTUNITY =====
+  const calculate2024CounterEvidenceTax = () => {
+    // If actual return is lower than notional, you can pay tax on actual return (Supreme Court 2024)
+    const taxableBase = Math.max(0, netWorth - taxFreeAllowance);
+    
+    // Calculate actual returns
+    const actualSavingsReturn = interestEarned;
+    const actualCryptoReturn = cryptoValueDec31 - cryptoValueJan1;
+    const actualRealEstateReturn = 0;
+    
+    const totalActualReturn = actualSavingsReturn + actualCryptoReturn + actualRealEstateReturn + dividendsReceived - debtInterest;
+    
+    // Proportion attributable to taxable base
+    const proportionTaxable = netWorth > 0 ? taxableBase / netWorth : 0;
+    const taxableActualReturn = totalActualReturn * proportionTaxable;
+    
+    const taxDue = Math.max(0, taxableActualReturn * 0.36);
+    return Math.round(taxDue);
+  };
+
+  const currentTax = calculate2024Tax();
+  const newTax = calculate2028Tax();
+  const counterEvidenceTax = calculate2024CounterEvidenceTax();
+  const potentialRefund = Math.max(0, currentTax - counterEvidenceTax);
   const difference = newTax - currentTax;
 
   // Form handling
   const updateFormData = (field, value) => {
     setFormData(prev => ({ ...prev, [field]: value }));
+  };
+
+  // Sync detailed financial data from form to state variables
+  const syncDetailedFinancials = () => {
+    setSavingsBalance(formData.savingsBalance || 0);
+    setInterestEarned(formData.interestEarned || 0);
+    setCryptoValueJan1(formData.cryptoValueJan1 || 0);
+    setCryptoValueDec31(formData.cryptoValueDec31 || 0);
+    setDividendsReceived(formData.dividendsReceived || 0);
+    setPropertyValue(formData.propertyValue || 0);
+    setRentalIncome(formData.rentalIncome || 0);
+    setSaleProceeds(formData.saleProceeds || 0);
+    setPurchasePrice(formData.purchasePrice || 0);
+    setDebtInterest(formData.debtInterest || 0);
+    setPriorYearLoss(formData.priorYearLoss || 0);
   };
 
   const validateStep = (step) => {
@@ -181,14 +321,24 @@ export default function App() {
       if (formData.grossSalary === '' || formData.grossSalary === null || formData.grossSalary === undefined) {
         errors.grossSalary = 'Gross salary is required (can be 0)';
       }
-      if (formData.savingsAmount === '' || formData.savingsAmount === null || formData.savingsAmount === undefined) {
-        errors.savingsAmount = 'Savings amount is required (can be 0)';
+      // New detailed fields are optional, just ensure types are correct
+      if (formData.savingsBalance === null || formData.savingsBalance === undefined) {
+        formData.savingsBalance = 0;
       }
-      if (formData.investmentAmount === '' || formData.investmentAmount === null || formData.investmentAmount === undefined) {
-        errors.investmentAmount = 'Investment amount is required (can be 0)';
+      if (formData.interestEarned === null || formData.interestEarned === undefined) {
+        formData.interestEarned = 0;
       }
-      if (formData.debtAmount === '' || formData.debtAmount === null || formData.debtAmount === undefined) {
-        errors.debtAmount = 'Debt amount is required (can be 0)';
+      if (formData.cryptoValueJan1 === null || formData.cryptoValueJan1 === undefined) {
+        formData.cryptoValueJan1 = 0;
+      }
+      if (formData.cryptoValueDec31 === null || formData.cryptoValueDec31 === undefined) {
+        formData.cryptoValueDec31 = 0;
+      }
+      if (formData.dividendsReceived === null || formData.dividendsReceived === undefined) {
+        formData.dividendsReceived = 0;
+      }
+      if (formData.debtInterest === null || formData.debtInterest === undefined) {
+        formData.debtInterest = 0;
       }
     } else if (step === 'dutchTax') {
       if (formData.jaarruimte === '' || formData.jaarruimte === null || formData.jaarruimte === undefined) {
@@ -198,9 +348,6 @@ export default function App() {
         errors.factorA = 'Factor A is required (can be 0)';
       }
     } else if (step === 'realEstate') {
-      if (formData.homeValue === '' || formData.homeValue === null || formData.homeValue === undefined) {
-        errors.homeValue = 'Home value is required (can be 0)';
-      }
       if (formData.mortgageBalance === '' || formData.mortgageBalance === null || formData.mortgageBalance === undefined) {
         errors.mortgageBalance = 'Mortgage balance is required (can be 0)';
       }
@@ -209,6 +356,22 @@ export default function App() {
       }
       if (formData.mortgageYearsLeft === '' || formData.mortgageYearsLeft === null || formData.mortgageYearsLeft === undefined) {
         errors.mortgageYearsLeft = 'Years left is required (can be 0)';
+      }
+      // New detailed fields are optional
+      if (formData.propertyValue === null || formData.propertyValue === undefined) {
+        formData.propertyValue = 0;
+      }
+      if (formData.rentalIncome === null || formData.rentalIncome === undefined) {
+        formData.rentalIncome = 0;
+      }
+      if (formData.saleProceeds === null || formData.saleProceeds === undefined) {
+        formData.saleProceeds = 0;
+      }
+      if (formData.purchasePrice === null || formData.purchasePrice === undefined) {
+        formData.purchasePrice = 0;
+      }
+      if (formData.priorYearLoss === null || formData.priorYearLoss === undefined) {
+        formData.priorYearLoss = 0;
       }
     }
     
@@ -256,6 +419,9 @@ export default function App() {
   };
 
   const submitToVertexAI = async () => {
+    // Sync detailed financial data from form to state variables
+    syncDetailedFinancials();
+
     // Calculate total Box 3 assets
     const totalBox3Assets = formData.savingsAmount + formData.investmentAmount - formData.debtAmount;
     const taxFreeAllowance = formData.hasSpouse ? 114000 : 57000; // 2026 allowance
@@ -263,11 +429,26 @@ export default function App() {
 
     const prompt = `You are a Dutch FIRE expert. Analyze this profile and provide tax-optimized wealth strategy.
 
-PROFILE:
+HOUSEHOLD:
 Age: ${formData.age} → Retire: ${formData.retirementAge} | ${formData.hasSpouse ? 'Partnered' : 'Single'}${formData.hasChildren ? `, ${formData.childrenCount} kids` : ''} | Salary: €${formData.grossSalary} | 30% Ruling: ${formData.has30PercentRuling ? 'Yes' : 'No'}
-Box 3: Savings €${formData.savingsAmount}, Investments €${formData.investmentAmount}, Debt €${formData.debtAmount} (Net: €${totalBox3Assets}, Taxable: €${taxableBase})
-Real Estate: WOZ €${formData.homeValue}, Mortgage €${formData.mortgageBalance} @ ${formData.mortgageInterestRate}%, ${formData.mortgageYearsLeft}yr left
-Tax: Jaarruimte €${formData.jaarruimte}, Factor A €${formData.factorA}
+
+DETAILED FINANCIAL BREAKDOWN:
+Bank & Savings: €${formData.savingsBalance} (Interest earned: €${formData.interestEarned})
+Stocks & Crypto: €${formData.cryptoValueDec31} (Jan 1 value: €${formData.cryptoValueJan1}, Dividends: €${formData.dividendsReceived})
+Real Estate: €${formData.propertyValue} (Rental income: €${formData.rentalIncome}, Sale proceeds: €${formData.saleProceeds}, Purchase price: €${formData.purchasePrice})
+Deductions: Interest on debt: €${formData.debtInterest}
+Loss Carry-Forward: €${formData.priorYearLoss}
+
+TAX COMPARISON (2024 vs 2028):
+2024 System (Fictional Yield): €${calculate2024Tax()} per year
+2028 System (Actual Returns): €${calculate2028Tax()} per year
+Difference: ${newTax > currentTax ? '+' : ''}€${newTax - currentTax} per year
+
+REAL ESTATE:
+Home Value: €${formData.homeValue}, Mortgage: €${formData.mortgageBalance} @ ${formData.mortgageInterestRate}%, ${formData.mortgageYearsLeft} years left
+
+TAX PARAMETERS:
+Jaarruimte (Pension room): €${formData.jaarruimte}, Factor A (Employer pension): €${formData.factorA}
 
 OUTPUT (exact format):
 MONTHLY_NEED: [number]
@@ -278,7 +459,7 @@ ALLOCATION_STOCKS: [0-100]
 ALLOCATION_BONDS: [0-100]
 ALLOCATION_REAL_ESTATE: [0-100]
 ALLOCATION_CASH: [0-100]
-CURRENT_WEALTH: ${formData.savingsAmount + formData.investmentAmount - formData.debtAmount}
+CURRENT_WEALTH: ${formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue}
 PROJECTED_AT_RETIREMENT: [number]
 ---ACTIONS---
 ACTION_STEP_1_TITLE: [title]
@@ -294,7 +475,7 @@ ACTION_STEP_3_PRIORITY: [High Priority|Medium Priority|Low Priority]
 ACTION_STEP_3_TAG: [NL Tax|Strategy|Tax Hack]
 ACTION_STEP_3_DESC: [one sentence]
 ---DUTCH_TAX---
-BOX3_STRATEGY: [2-3 sentences on Box 3 optimization with 2026 rates]
+BOX3_STRATEGY: [2-3 sentences on Box 3 optimization considering 2024 fictional yield vs 2028 actual returns system]
 PENSION_RECOMMENDATIONS: [2-3 sentences on jaarruimte/lijfrente]
 ESTIMATED_ANNUAL_BOX3_TAX: [number]
 ---PRODUCTS---
@@ -794,7 +975,7 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                         Asset Shelter
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        Money invested in a primary home is not subject to the heavy Box 3 wealth tax, which in 2026 assumes a high fictitious return of <strong className="text-white">7.78%</strong> on investments. Moving "taxable" wealth into a "tax-free" home can save you thousands annually.
+                        Money invested in a primary home is not subject to the heavy Box 3 wealth tax, which in 2024 assumes a high fictitious return of <strong className="text-white">6.04%</strong> on investments. Moving "taxable" wealth into a "tax-free" home can save you thousands annually.
                       </p>
                     </div>
 
@@ -859,7 +1040,7 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                         The "Rebuttal Scheme" (Tegenbewijsregeling)
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        If your actual investment returns in 2026 are lower than the government's assumed 7.78%, the PDF explains how to file for a tax reduction based on your real results.
+                        If your actual investment returns in 2024 are lower than the government's assumed 6.04%, the PDF explains how to file for a tax reduction based on your real results.
                       </p>
                     </div>
 
@@ -871,7 +1052,7 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                         Wealth Reallocation
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        Recommends shifting "Other Assets" into "Savings" before the October 1st cut-off to benefit from lower fictitious return rates (~1.44% vs 7.78%).
+                        Recommends shifting "Other Assets" into "Savings" before the October 1st cut-off to benefit from lower fictitious return rates (~1.03% vs 6.04%).
                       </p>
                     </div>
 
@@ -1941,91 +2122,151 @@ Focus on the most critical insight - either the biggest opportunity they're miss
               {/* Financials Step */}
               {currentStep === 'financials' && (
                 <div>
-                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Financial Overview</h1>
-                  <p className="text-slate-400 mb-8 sm:mb-12">Tell us about your income and assets.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Financial Details</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">Break down your income and assets by category.</p>
 
-                  <div className="space-y-6">
+                  <div className="space-y-8">
+                    {/* Income */}
                     <div>
-                      <label className="block text-white font-medium mb-2">Annual Gross Salary (Box 1)</label>
-                      <div className="relative">
-                        <span className="absolute left-4 top-3 text-slate-400">€</span>
-                        <input
-                          type="number"
-                          value={formData.grossSalary}
-                          onChange={(e) => updateFormData('grossSalary', Number(e.target.value))}
-                          className={`w-full bg-slate-800 border ${validationErrors.grossSalary ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                        />
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">💼</span> Income
+                      </h3>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Annual Gross Salary (Box 1)</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.grossSalary}
+                              onChange={(e) => updateFormData('grossSalary', Number(e.target.value))}
+                              className={`w-full bg-slate-800 border ${validationErrors.grossSalary ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                            />
+                          </div>
+                          {validationErrors.grossSalary && (
+                            <p className="text-red-500 text-sm mt-1">{validationErrors.grossSalary}</p>
+                          )}
+                        </div>
+
+                        <div className="flex items-center justify-between">
+                          <div>
+                            <span className="text-white font-medium block text-sm">30% Ruling Status</span>
+                            <span className="text-slate-400 text-xs">Tax-advantaged expat status</span>
+                          </div>
+                          <button
+                            onClick={() => updateFormData('has30PercentRuling', !formData.has30PercentRuling)}
+                            className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
+                              formData.has30PercentRuling ? 'bg-emerald-500' : 'bg-slate-600'
+                            }`}
+                          >
+                            <span
+                              className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
+                                formData.has30PercentRuling ? 'translate-x-6' : 'translate-x-1'
+                              }`}
+                            />
+                          </button>
+                        </div>
                       </div>
-                      {validationErrors.grossSalary && (
-                        <p className="text-red-500 text-sm mt-1">{validationErrors.grossSalary}</p>
-                      )}
                     </div>
 
-                    <div className="flex items-center justify-between py-4 border-t border-b border-slate-700">
-                      <div>
-                        <span className="text-white font-medium block">30% Ruling Status</span>
-                        <span className="text-slate-400 text-sm">Are you eligible for the 30% ruling?</span>
+                    {/* Bank & Savings */}
+                    <div>
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">🏦</span> Bank & Savings
+                      </h3>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Savings Balance</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.savingsBalance}
+                              onChange={(e) => updateFormData('savingsBalance', Number(e.target.value))}
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Interest Earned (Annual)</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.interestEarned}
+                              onChange={(e) => updateFormData('interestEarned', Number(e.target.value))}
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                        </div>
                       </div>
-                      <button
-                        onClick={() => updateFormData('has30PercentRuling', !formData.has30PercentRuling)}
-                        className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                          formData.has30PercentRuling ? 'bg-emerald-500' : 'bg-slate-600'
-                        }`}
-                      >
-                        <span
-                          className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                            formData.has30PercentRuling ? 'translate-x-6' : 'translate-x-1'
-                          }`}
-                        />
-                      </button>
                     </div>
 
+                    {/* Stocks & Crypto */}
                     <div>
-                      <label className="block text-white font-medium mb-2">Savings / Bank Balance (Box 3)</label>
-                      <div className="relative">
-                        <span className="absolute left-4 top-3 text-slate-400">€</span>
-                        <input
-                          type="number"
-                          value={formData.savingsAmount}
-                          onChange={(e) => updateFormData('savingsAmount', Number(e.target.value))}
-                          className={`w-full bg-slate-800 border ${validationErrors.savingsAmount ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                        />
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">📈</span> Stocks & Crypto
+                      </h3>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Value on Jan 1</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.cryptoValueJan1}
+                              onChange={(e) => updateFormData('cryptoValueJan1', Number(e.target.value))}
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Value on Dec 31</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.cryptoValueDec31}
+                              onChange={(e) => updateFormData('cryptoValueDec31', Number(e.target.value))}
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Dividends Received (Annual)</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.dividendsReceived}
+                              onChange={(e) => updateFormData('dividendsReceived', Number(e.target.value))}
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                        </div>
                       </div>
-                      {validationErrors.savingsAmount && (
-                        <p className="text-red-500 text-sm mt-1">{validationErrors.savingsAmount}</p>
-                      )}
                     </div>
 
+                    {/* Deductions */}
                     <div>
-                      <label className="block text-white font-medium mb-2">Investments (Stocks, ETFs, Crypto)</label>
-                      <div className="relative">
-                        <span className="absolute left-4 top-3 text-slate-400">€</span>
-                        <input
-                          type="number"
-                          value={formData.investmentAmount}
-                          onChange={(e) => updateFormData('investmentAmount', Number(e.target.value))}
-                          className={`w-full bg-slate-800 border ${validationErrors.investmentAmount ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                        />
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">📉</span> Deductions
+                      </h3>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Interest on Debt (Annual)</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.debtInterest}
+                              onChange={(e) => updateFormData('debtInterest', Number(e.target.value))}
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                          <p className="text-slate-400 text-xs mt-2">Mortgage interest, personal loan interest, etc.</p>
+                        </div>
                       </div>
-                      {validationErrors.investmentAmount && (
-                        <p className="text-red-500 text-sm mt-1">{validationErrors.investmentAmount}</p>
-                      )}
-                    </div>
-
-                    <div>
-                      <label className="block text-white font-medium mb-2">Total Debt (Non-Mortgage)</label>
-                      <div className="relative">
-                        <span className="absolute left-4 top-3 text-slate-400">€</span>
-                        <input
-                          type="number"
-                          value={formData.debtAmount}
-                          onChange={(e) => updateFormData('debtAmount', Number(e.target.value))}
-                          className={`w-full bg-slate-800 border ${validationErrors.debtAmount ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                        />
-                      </div>
-                      {validationErrors.debtAmount && (
-                        <p className="text-red-500 text-sm mt-1">{validationErrors.debtAmount}</p>
-                      )}
                     </div>
                   </div>
 
@@ -2120,71 +2361,151 @@ Focus on the most critical insight - either the biggest opportunity they're miss
               {/* Real Estate Step */}
               {currentStep === 'realEstate' && (
                 <div>
-                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Real Estate & Housing</h1>
-                  <p className="text-slate-400 mb-8 sm:mb-12">Tell us about your primary residence.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Real Estate & Property Details</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">Tell us about your residential and investment property.</p>
 
-                  <div className="space-y-6">
+                  <div className="space-y-8">
+                    {/* Primary Residence */}
                     <div>
-                      <label className="block text-white font-medium mb-2">Primary Residence Value (WOZ-waarde)</label>
-                      <div className="relative">
-                        <span className="absolute left-4 top-3 text-slate-400">€</span>
-                        <input
-                          type="number"
-                          value={formData.homeValue}
-                          onChange={(e) => updateFormData('homeValue', Number(e.target.value))}
-                          className={`w-full bg-slate-800 border ${validationErrors.homeValue ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                        />
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">🏠</span> Primary Residence
+                      </h3>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Property Value (WOZ-waarde)</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.propertyValue}
+                              onChange={(e) => updateFormData('propertyValue', Number(e.target.value))}
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Mortgage Balance</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.mortgageBalance}
+                              onChange={(e) => updateFormData('mortgageBalance', Number(e.target.value))}
+                              className={`w-full bg-slate-800 border ${validationErrors.mortgageBalance ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                            />
+                          </div>
+                          {validationErrors.mortgageBalance && (
+                            <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageBalance}</p>
+                          )}
+                        </div>
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Mortgage Interest Rate (%)</label>
+                          <div className="relative">
+                            <input
+                              type="number"
+                              step="0.1"
+                              value={formData.mortgageInterestRate}
+                              onChange={(e) => updateFormData('mortgageInterestRate', Number(e.target.value))}
+                              className={`w-full bg-slate-800 border ${validationErrors.mortgageInterestRate ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                            />
+                            <span className="absolute right-4 top-3 text-slate-400">%</span>
+                          </div>
+                          {validationErrors.mortgageInterestRate && (
+                            <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageInterestRate}</p>
+                          )}
+                        </div>
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Remaining Mortgage Term (Years)</label>
+                          <input
+                            type="number"
+                            value={formData.mortgageYearsLeft}
+                            onChange={(e) => updateFormData('mortgageYearsLeft', Number(e.target.value))}
+                            className={`w-full bg-slate-800 border ${validationErrors.mortgageYearsLeft ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                          />
+                          {validationErrors.mortgageYearsLeft && (
+                            <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageYearsLeft}</p>
+                          )}
+                        </div>
                       </div>
-                      {validationErrors.homeValue && (
-                        <p className="text-red-500 text-sm mt-1">{validationErrors.homeValue}</p>
-                      )}
                     </div>
 
+                    {/* Investment Real Estate */}
                     <div>
-                      <label className="block text-white font-medium mb-2">Current Mortgage Balance</label>
-                      <div className="relative">
-                        <span className="absolute left-4 top-3 text-slate-400">€</span>
-                        <input
-                          type="number"
-                          value={formData.mortgageBalance}
-                          onChange={(e) => updateFormData('mortgageBalance', Number(e.target.value))}
-                          className={`w-full bg-slate-800 border ${validationErrors.mortgageBalance ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                        />
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">🏢</span> Investment Real Estate (if any)
+                      </h3>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Rental Income (Annual)</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.rentalIncome}
+                              onChange={(e) => updateFormData('rentalIncome', Number(e.target.value))}
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Property Sale Proceeds (2025)</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.saleProceeds}
+                              onChange={(e) => updateFormData('saleProceeds', Number(e.target.value))}
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                          <p className="text-slate-400 text-xs mt-2">If you sold investment property in the tax year</p>
+                        </div>
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Original Purchase Price</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.purchasePrice}
+                              onChange={(e) => updateFormData('purchasePrice', Number(e.target.value))}
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                          <p className="text-slate-400 text-xs mt-2">Original cost basis for calculating capital gain</p>
+                        </div>
                       </div>
-                      {validationErrors.mortgageBalance && (
-                        <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageBalance}</p>
-                      )}
                     </div>
 
+                    {/* Loss Carry-Forward */}
                     <div>
-                      <label className="block text-white font-medium mb-2">Mortgage Interest Rate (%)</label>
-                      <div className="relative">
-                        <input
-                          type="number"
-                          step="0.1"
-                          value={formData.mortgageInterestRate}
-                          onChange={(e) => updateFormData('mortgageInterestRate', Number(e.target.value))}
-                          className={`w-full bg-slate-800 border ${validationErrors.mortgageInterestRate ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                        />
-                        <span className="absolute right-4 top-3 text-slate-400">%</span>
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">📋</span> Loss Carry-Forward
+                      </h3>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Prior Year Loss (Box 3)</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.priorYearLoss}
+                              onChange={(e) => updateFormData('priorYearLoss', Number(e.target.value))}
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                          <p className="text-slate-400 text-xs mt-2">Loss from 2024 or earlier years that can be deducted</p>
+                        </div>
                       </div>
-                      {validationErrors.mortgageInterestRate && (
-                        <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageInterestRate}</p>
-                      )}
                     </div>
 
-                    <div>
-                      <label className="block text-white font-medium mb-2">Remaining Mortgage Term (Years)</label>
-                      <input
-                        type="number"
-                        value={formData.mortgageYearsLeft}
-                        onChange={(e) => updateFormData('mortgageYearsLeft', Number(e.target.value))}
-                        className={`w-full bg-slate-800 border ${validationErrors.mortgageYearsLeft ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                      />
-                      {validationErrors.mortgageYearsLeft && (
-                        <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageYearsLeft}</p>
-                      )}
-                    </div>
+                    {/* Legacy Fields - only show if using old values */}
+                    {formData.homeValue > 0 && (
+                      <div className="bg-yellow-900/20 border border-yellow-700/50 rounded-lg p-4">
+                        <p className="text-yellow-300 text-xs">
+                          <strong>Note:</strong> Update Property Value above to sync primary residence details.
+                        </p>
+                      </div>
+                    )}
                   </div>
 
                   <div className="flex items-center justify-between mt-8 sm:mt-12">
@@ -2364,180 +2685,439 @@ Focus on the most critical insight - either the biggest opportunity they're miss
           {/* Calculator Section - Two Column Layout */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-12">
             {/* Left Card - Your Situation */}
-            <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
-              <div className="flex items-center gap-3 mb-6">
-                <div className="w-12 h-12 bg-emerald-500/20 rounded-lg flex items-center justify-center">
-                  <svg className="w-6 h-6 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
-                  </svg>
+            <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-6">
+              <div className="flex items-center justify-between mb-6">
+                <h3 className="text-lg font-bold text-white">Your Situation</h3>
+                <button className="text-xs font-medium bg-slate-700 text-slate-300 px-3 py-1 rounded">Single</button>
+              </div>
+
+              {/* Bank & Savings */}
+              <div className="mb-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="text-emerald-400 text-lg">💰</span>
+                  <h4 className="font-bold text-white">Bank & Savings</h4>
                 </div>
-                <div>
-                  <h3 className="text-lg font-bold text-white">{t.calculator.yourSituation}</h3>
-                  <p className="text-xs text-slate-400">{t.calculator.adjustToSee}</p>
+                <div className="space-y-4">
+                  <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-center mb-3">
+                      <label className="text-white font-medium text-sm">Savings Balance</label>
+                      <span className="text-emerald-400 font-semibold text-sm">€{savingsBalance.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="200000"
+                      step="1000"
+                      value={savingsBalance}
+                      onChange={(e) => setSavingsBalance(Number(e.target.value))}
+                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                    />
+                  </div>
+                  <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-center mb-3">
+                      <label className="text-white font-medium text-sm">Interest Earned</label>
+                      <span className="text-emerald-400 font-semibold text-sm">€{interestEarned.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="5000"
+                      step="50"
+                      value={interestEarned}
+                      onChange={(e) => setInterestEarned(Number(e.target.value))}
+                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                    />
+                  </div>
                 </div>
               </div>
 
-              {/* Preset Tabs */}
-              <div className="flex gap-1 sm:gap-2 mb-8">
-                <button
-                  onClick={() => applyPreset('starter')}
-                  className={`flex-1 py-2 px-2 sm:py-2.5 sm:px-3 rounded-lg text-xs sm:text-sm font-medium transition-all ${
-                    preset === 'starter'
-                      ? 'bg-slate-700 text-white'
-                      : 'bg-slate-900/50 text-slate-400 hover:bg-slate-700/50'
-                  }`}
-                >
-                  {t.calculator.starter}
-                </button>
-                <button
-                  onClick={() => applyPreset('growing')}
-                  className={`flex-1 py-2 px-2 sm:py-2.5 sm:px-3 rounded-lg text-xs sm:text-sm font-medium transition-all ${
-                    preset === 'growing'
-                      ? 'bg-slate-700 text-white'
-                      : 'bg-slate-900/50 text-slate-400 hover:bg-slate-700/50'
-                  }`}
-                >
-                  {t.calculator.growing}
-                </button>
-                <button
-                  onClick={() => applyPreset('established')}
-                  className={`flex-1 py-2 px-2 sm:py-2.5 sm:px-3 rounded-lg text-xs sm:text-sm font-medium transition-all ${
-                    preset === 'established'
-                      ? 'bg-slate-700 text-white'
-                      : 'bg-slate-900/50 text-slate-400 hover:bg-slate-700/50'
-                  }`}
-                >
-                  {t.calculator.established}
-                </button>
+              {/* Stocks & Crypto */}
+              <div className="mb-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="text-blue-400 text-lg">📈</span>
+                  <h4 className="font-bold text-white">Stocks & Crypto</h4>
+                </div>
+                <div className="space-y-4">
+                  <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-center mb-3">
+                      <label className="text-white font-medium text-sm">Value Jan 1</label>
+                      <span className="text-emerald-400 font-semibold text-sm">€{cryptoValueJan1.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="500000"
+                      step="5000"
+                      value={cryptoValueJan1}
+                      onChange={(e) => setCryptoValueJan1(Number(e.target.value))}
+                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                    />
+                  </div>
+                  <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-center mb-3">
+                      <label className="text-white font-medium text-sm">Value Dec 31</label>
+                      <span className="text-emerald-400 font-semibold text-sm">€{cryptoValueDec31.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="500000"
+                      step="5000"
+                      value={cryptoValueDec31}
+                      onChange={(e) => setCryptoValueDec31(Number(e.target.value))}
+                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                    />
+                  </div>
+                  <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-center mb-3">
+                      <label className="text-white font-medium text-sm">Dividends Received</label>
+                      <span className="text-emerald-400 font-semibold text-sm">€{dividendsReceived.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="10000"
+                      step="100"
+                      value={dividendsReceived}
+                      onChange={(e) => setDividendsReceived(Number(e.target.value))}
+                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                    />
+                  </div>
+                </div>
               </div>
 
-              {/* Sliders */}
-              <div className="space-y-8">
-                {/* Savings Slider */}
-                <div>
-                  <div className="flex justify-between mb-3">
-                    <label className="text-slate-300 font-medium">{t.calculator.savings}</label>
-                    <span className="text-white font-semibold">€{savings.toLocaleString()}</span>
-                  </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="500000"
-                    step="5000"
-                    value={savings}
-                    onChange={(e) => setSavings(Number(e.target.value))}
-                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer slider-green"
-                  />
+              {/* Real Estate */}
+              <div className="mb-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="text-orange-400 text-lg">🏠</span>
+                  <h4 className="font-bold text-white">Real Estate (excl. primary home)</h4>
                 </div>
-
-                {/* Investments Slider */}
-                <div>
-                  <div className="flex justify-between mb-3">
-                    <label className="text-slate-300 font-medium">{t.calculator.investments}</label>
-                    <span className="text-white font-semibold">€{investments.toLocaleString()}</span>
+                <div className="space-y-4">
+                  <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-center mb-3">
+                      <label className="text-white font-medium text-sm">Property Value</label>
+                      <span className="text-emerald-400 font-semibold text-sm">€{propertyValue.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="1000000"
+                      step="10000"
+                      value={propertyValue}
+                      onChange={(e) => setPropertyValue(Number(e.target.value))}
+                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                    />
                   </div>
-                  <input
-                    type="range"
-                    min="0"
-                    max="1000000"
-                    step="10000"
-                    value={investments}
-                    onChange={(e) => setInvestments(Number(e.target.value))}
-                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer slider-green"
-                  />
+                  <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-center mb-3">
+                      <label className="text-white font-medium text-sm">Rental Income</label>
+                      <span className="text-emerald-400 font-semibold text-sm">€{rentalIncome.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="50000"
+                      step="500"
+                      value={rentalIncome}
+                      onChange={(e) => setRentalIncome(Number(e.target.value))}
+                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                    />
+                  </div>
+                  <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-center mb-3">
+                      <label className="text-white font-medium text-sm">Sale Proceeds (if not sold)</label>
+                      <span className="text-emerald-400 font-semibold text-sm">€{saleProceeds.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="500000"
+                      step="5000"
+                      value={saleProceeds}
+                      onChange={(e) => setSaleProceeds(Number(e.target.value))}
+                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                    />
+                  </div>
+                  <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-center mb-3">
+                      <label className="text-white font-medium text-sm">Purchase Price</label>
+                      <span className="text-emerald-400 font-semibold text-sm">€{purchasePrice.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="500000"
+                      step="5000"
+                      value={purchasePrice}
+                      onChange={(e) => setPurchasePrice(Number(e.target.value))}
+                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                    />
+                  </div>
                 </div>
+              </div>
 
-                {/* Expected Actual Return Slider */}
+              {/* Deductions */}
+              <div className="mb-6">
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="text-red-400 text-lg">🔴</span>
+                  <h4 className="font-bold text-white">Deductions</h4>
+                </div>
                 <div>
-                  <div className="flex justify-between mb-3">
-                    <label className="text-slate-300 font-medium">{t.calculator.expectedReturn}</label>
-                    <span className="text-white font-semibold">{expectedReturn}%</span>
+                  <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-center mb-3">
+                      <label className="text-white font-medium text-sm">Costs (debt interest, etc.)</label>
+                      <span className="text-emerald-400 font-semibold text-sm">€{debtInterest.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="50000"
+                      step="500"
+                      value={debtInterest}
+                      onChange={(e) => setDebtInterest(Number(e.target.value))}
+                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                    />
                   </div>
-                  <input
-                    type="range"
-                    min="-10"
-                    max="20"
-                    step="1"
-                    value={expectedReturn}
-                    onChange={(e) => setExpectedReturn(Number(e.target.value))}
-                    className="w-full h-2 bg-slate-700 rounded-lg appearance-none cursor-pointer slider-green"
-                  />
-                  <div className="flex justify-between text-xs text-slate-500 mt-1">
-                    <span>-10%</span>
-                    <span>+20%</span>
+                </div>
+              </div>
+
+              {/* Loss Carry-Forward */}
+              <div>
+                <div className="flex items-center gap-2 mb-4">
+                  <span className="text-purple-400 text-lg">📊</span>
+                  <h4 className="font-bold text-white">Loss Carry-Forward</h4>
+                </div>
+                <div>
+                  <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
+                    <div className="flex justify-between items-center mb-3">
+                      <label className="text-white font-medium text-sm">Prior Year Loss</label>
+                      <span className="text-emerald-400 font-semibold text-sm">€{priorYearLoss.toLocaleString()}</span>
+                    </div>
+                    <input
+                      type="range"
+                      min="0"
+                      max="100000"
+                      step="1000"
+                      value={priorYearLoss}
+                      onChange={(e) => setPriorYearLoss(Number(e.target.value))}
+                      className="w-full h-2 bg-white/10 rounded-lg appearance-none cursor-pointer accent-emerald-500"
+                    />
                   </div>
                 </div>
               </div>
             </div>
 
             {/* Right Card - Your Tax Comparison */}
-            <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
-              <h3 className="text-xl font-bold text-white mb-6">{t.calculator.yourTaxComparison}</h3>
+            <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-6">
+              <h3 className="text-lg font-bold text-white mb-6">Tax Comparison</h3>
 
-              {/* Current System 2024 */}
-              <div className="bg-slate-900/50 rounded-xl p-6 mb-4 border border-slate-700">
-                <div className="flex justify-between items-center mb-3">
-                  <span className="text-slate-300 font-medium">{t.calculator.currentSystem}</span>
-                  <span className="text-xs font-bold text-emerald-500 bg-emerald-500/20 px-3 py-1 rounded-full">
-                    {t.calculator.fictionalYield}
-                  </span>
-                </div>
-                <div className="text-3xl font-bold text-white mb-2">
-                  €{Math.round(currentTax).toLocaleString()}
-                  <span className="text-base text-slate-400 font-normal"> {t.calculator.year}</span>
-                </div>
-                <p className="text-xs text-slate-400">
-                  {t.calculator.basedOnFictional}
-                </p>
-              </div>
-
-              {/* New System 2028 */}
-              <div className="bg-slate-900/50 rounded-xl p-6 mb-6 border border-slate-700">
-                <div className="flex justify-between items-center mb-3">
-                  <span className="text-slate-300 font-medium">{t.calculator.newSystem}</span>
-                  <span className="text-xs font-bold text-red-500 bg-red-500/20 px-3 py-1 rounded-full">
-                    {t.calculator.actualReturns}
-                  </span>
-                </div>
-                <div className="text-3xl font-bold text-white mb-2">
-                  €{Math.round(newTax).toLocaleString()}
-                  <span className="text-base text-slate-400 font-normal"> {t.calculator.year}</span>
-                </div>
-                <p className="text-xs text-slate-400">
-                  {t.calculator.basedOnActual} {expectedReturn}% {t.calculator.actualReturn}
-                </p>
-              </div>
-
-              {/* You'll Pay More/Less Box */}
-              <div className={`rounded-xl p-6 border-2 ${
-                difference > 0 ? 'bg-red-950/30 border-red-800' : 'bg-emerald-950/30 border-emerald-800'
-              }`}>
-                <div className="flex items-center gap-2 mb-3">
-                  <span className="text-xl">{difference > 0 ? '📈' : '📉'}</span>
-                  <span className="text-white font-semibold">{difference > 0 ? t.calculator.youllPayMore : t.calculator.youllPayLess}</span>
-                </div>
-                <div className={`text-3xl font-bold mb-2 ${difference > 0 ? 'text-red-400' : 'text-emerald-400'}`}>
-                  {difference > 0 ? '+' : ''}€{Math.abs(Math.round(difference)).toLocaleString()}
-                  <span className="text-base text-slate-400 font-normal"> {t.calculator.year}</span>
-                </div>
+              {/* Old System 2024 - Collapsible Breakdown */}
+              <div className="bg-slate-700/30 rounded-xl p-5 mb-6 border border-slate-700">
+                <button 
+                  onClick={() => setExpandTax2024(!expandTax2024)}
+                  className="w-full flex justify-between items-center hover:bg-slate-700/20 rounded-lg p-2 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-slate-300 font-medium text-sm">Old System — Fictional Yield (2024)</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl font-bold text-white">€{Math.round(currentTax).toLocaleString()}/yr</span>
+                    <svg 
+                      className={`w-5 h-5 text-slate-400 transition-transform ${expandTax2024 ? 'rotate-180' : ''}`} 
+                      fill="none" 
+                      stroke="currentColor" 
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                    </svg>
+                  </div>
+                </button>
                 
-                {/* 10 Year Projection */}
-                {difference > 0 && (
-                  <div className="mt-4 pt-4 border-t border-red-800/50">
-                    <p className="text-sm text-red-300">
-                      {t.calculator.over10Years} <span className="font-bold text-red-400">€{Math.abs(Math.round(difference * 10)).toLocaleString()}</span>.
-                    </p>
+                {/* Breakdown Details - Collapsible */}
+                {expandTax2024 && (
+                  <div className="bg-slate-800/50 rounded-lg p-4 mt-4 space-y-3 text-xs border-t border-slate-600">
+                    <div className="border-b border-slate-600 pb-3">
+                      <p className="text-slate-400 mb-2">📊 Asset Base (January 1):</p>
+                      <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
+                        <span>• Savings: €{savingsBalance.toLocaleString()}</span>
+                        <span>• Stocks/Crypto: €{cryptoValueJan1.toLocaleString()}</span>
+                        <span>• Real Estate: €{propertyValue.toLocaleString()}</span>
+                        <span className="font-semibold text-white">Total Assets: €{(savingsBalance + cryptoValueJan1 + propertyValue).toLocaleString()}</span>
+                      </div>
+                    </div>
+                    
+                    <div className="border-b border-slate-600 pb-3">
+                      <p className="text-slate-400 mb-2">📈 Notional Returns (2024 Official Rates):</p>
+                      <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
+                        <span>• Savings (1.03%): €{Math.round(savingsBalance * 0.0103).toLocaleString()}</span>
+                        <span>• Investments & Other (6.04%): €{Math.round((cryptoValueJan1 + propertyValue) * 0.0604).toLocaleString()}</span>
+                        <span className="font-semibold text-white col-span-2">Total Notional Return: €{Math.round(savingsBalance * 0.0103 + (cryptoValueJan1 + propertyValue) * 0.0604).toLocaleString()}</span>
+                      </div>
+                    </div>
+                    
+                    <div className="border-b border-slate-600 pb-3">
+                      <p className="text-slate-400 mb-2">⚖️ Effective Yield & Taxable Base:</p>
+                      <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
+                        <span>• Effective Yield: {((savingsBalance * 0.0103 + (cryptoValueJan1 + propertyValue) * 0.0604) / (savingsBalance + cryptoValueJan1 + propertyValue) * 100).toFixed(3)}%</span>
+                        <span>• Tax-Free Allowance: €57,000</span>
+                        <span className="font-semibold text-white col-span-2">Taxable Base: €{Math.max(0, (savingsBalance + cryptoValueJan1 + propertyValue) - 57000).toLocaleString()}</span>
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <p className="text-slate-400 mb-2">✖️ Final Calculation (Taxable Base × Effective Yield × 36%):</p>
+                      <div className="ml-2 text-white font-semibold">
+                        € {Math.round(currentTax).toLocaleString()}
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
 
-              {/* Info Message */}
-              <div className="mt-6 flex gap-3 bg-slate-900/30 rounded-lg p-4 border border-slate-700">
-                <span className="text-emerald-500 text-xl">⚡</span>
-                <p className="text-sm text-slate-400 leading-relaxed">
-                  {difference > 0 ? t.calculator.infoMore : t.calculator.infoLess}
+              {/* New System 2028 - Collapsible Breakdown */}
+              <div className="bg-emerald-900/20 rounded-xl p-5 mb-6 border border-emerald-800">
+                <button 
+                  onClick={() => setExpandTax2028(!expandTax2028)}
+                  className="w-full flex justify-between items-center hover:bg-emerald-900/30 rounded-lg p-2 transition-colors"
+                >
+                  <div className="flex items-center gap-3">
+                    <span className="text-slate-300 font-medium text-sm">New System — Actual Returns (2028)</span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <span className="text-2xl font-bold text-white">€{Math.round(newTax).toLocaleString()}/yr</span>
+                    <svg 
+                      className={`w-5 h-5 text-emerald-400 transition-transform ${expandTax2028 ? 'rotate-180' : ''}`} 
+                      fill="none" 
+                      stroke="currentColor" 
+                      viewBox="0 0 24 24"
+                    >
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 14l-7 7m0 0l-7-7m7 7V3" />
+                    </svg>
+                  </div>
+                </button>
+                
+                {/* Breakdown Details - Collapsible */}
+                {expandTax2028 && (
+                  <div className="bg-emerald-950/30 rounded-lg p-4 mt-4 space-y-3 text-xs border-t border-emerald-700">
+                    <div className="border-b border-emerald-700 pb-3">
+                      <p className="text-emerald-300 mb-2">💰 Income Sources:</p>
+                      <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
+                        <span>• Savings Interest: €{interestEarned.toLocaleString()}</span>
+                        <span>• Stock/Crypto Gain: €{Math.max(0, cryptoValueDec31 - cryptoValueJan1).toLocaleString()}</span>
+                        <span>• Dividends: €{dividendsReceived.toLocaleString()}</span>
+                        <span>• Rental Income: €{rentalIncome.toLocaleString()}</span>
+                        <span className="font-semibold text-white col-span-2">Total Income: €{(interestEarned + Math.max(0, cryptoValueDec31 - cryptoValueJan1) + dividendsReceived + rentalIncome).toLocaleString()}</span>
+                      </div>
+                    </div>
+                    
+                    <div className="border-b border-emerald-700 pb-3">
+                      <p className="text-emerald-300 mb-2">📌 Deductions & Credits:</p>
+                      <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
+                        <span>• Interest Costs: -€{debtInterest.toLocaleString()}</span>
+                        <span>• Prior Year Loss: -€{priorYearLoss.toLocaleString()}</span>
+                        <span className="font-semibold text-white col-span-2">Net Income: €{Math.max(0, interestEarned + Math.max(0, cryptoValueDec31 - cryptoValueJan1) + dividendsReceived + rentalIncome - debtInterest - priorYearLoss).toLocaleString()}</span>
+                      </div>
+                    </div>
+                    
+                    <div className="border-b border-emerald-700 pb-3">
+                      <p className="text-emerald-300 mb-2">🎯 Tax-Free Threshold & Final Tax:</p>
+                      <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
+                        <span>• Taxable Profit: €{Math.max(0, Math.max(0, interestEarned + Math.max(0, cryptoValueDec31 - cryptoValueJan1) + dividendsReceived + rentalIncome - debtInterest - priorYearLoss) - 1800).toLocaleString()}</span>
+                        <span>• Tax Rate: 36%</span>
+                        <span className="font-semibold text-white col-span-2">Tax Due: €{Math.round(newTax).toLocaleString()}</span>
+                      </div>
+                    </div>
+                    
+                    <div className="bg-emerald-900/20 rounded-lg p-3 border border-emerald-700">
+                      <p className="text-emerald-200 mb-2 text-xs font-semibold">💧 Liquidity Note:</p>
+                      <div className="text-xs text-emerald-300">
+                        {(() => {
+                          const directCash = interestEarned + dividendsReceived + rentalIncome;
+                          const liquidityPercent = directCash > 0 ? Math.round((newTax / directCash) * 100) : 0;
+                          return (
+                            <span>
+                              {directCash > 0 
+                                ? `Your tax bill consumes ${liquidityPercent}% of direct cash income (Interest + Dividends + Rent).` 
+                                : 'No direct cash income to assess liquidity.'}
+                            </span>
+                          );
+                        })()}
+                      </div>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* You'll Pay More/Less Box */}
+              <div className={`rounded-xl p-5 border-2 mb-6 ${
+                difference < 0 ? 'bg-emerald-950/30 border-emerald-700' : 'bg-red-950/30 border-red-800'
+              }`}>
+                <div className="flex items-center gap-2 mb-2">
+                  <span className="text-xl">{difference < 0 ? '📉' : '📈'}</span>
+                  <span className="text-white font-semibold text-sm">{difference < 0 ? 'You\'ll Pay Less' : 'You\'ll Pay More'}</span>
+                </div>
+                <div className={`text-3xl font-bold mb-3 ${difference < 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                  {difference < 0 ? '-' : '+'}€{Math.abs(Math.round(difference)).toLocaleString()}
+                  <span className="text-sm text-slate-400 font-normal ml-2">/ year</span>
+                </div>
+                <p className={`text-xs leading-relaxed ${difference < 0 ? 'text-emerald-300' : 'text-red-300'}`}>
+                  {difference < 0 
+                    ? '✓ The new system benefits you because your actual returns are lower than the fictional yield assumption.' 
+                    : '⚠️ The new system increases your tax burden because you have unrealized gains (especially from investments) that are now directly taxed.'}
                 </p>
               </div>
+
+              {/* Portfolio vs Tax Liability Chart */}
+              <div className="bg-slate-900/20 rounded-lg p-6 mb-4 border border-slate-800">
+                <p className="text-xs text-slate-400 text-center mb-6 font-semibold">Portfolio vs Tax Liability</p>
+                <div className="flex items-end justify-around gap-6" style={{ minHeight: '160px' }}>
+                  {/* Portfolio Bar */}
+                  <div className="flex flex-col items-center flex-1">
+                    <div className="text-xs text-slate-400 mb-2 font-medium">€{Math.round(netWorth / 1000)}k</div>
+                    <div className="w-16 bg-gradient-to-t from-emerald-500 to-emerald-400 rounded-t-lg border border-emerald-400" 
+                         style={{ height: `${Math.min(120, (netWorth / 1000000) * 120)}px` }}>
+                    </div>
+                    <span className="text-xs text-slate-400 mt-3 font-medium">Portfolio</span>
+                  </div>
+                  {/* Old Tax Bar */}
+                  <div className="flex flex-col items-center flex-1">
+                    <div className="text-xs text-slate-400 mb-2 font-medium">€{Math.round(currentTax / 1000)}k</div>
+                    <div className="w-16 bg-gradient-to-t from-slate-500 to-slate-400 rounded-t-lg border border-slate-400" 
+                         style={{ height: `${Math.min(120, (currentTax / 5000) * 120)}px` }}>
+                    </div>
+                    <span className="text-xs text-slate-400 mt-3 font-medium">2024 Tax</span>
+                  </div>
+                  {/* New Tax Bar */}
+                  <div className="flex flex-col items-center flex-1">
+                    <div className="text-xs text-slate-400 mb-2 font-medium">€{Math.round(newTax / 1000)}k</div>
+                    <div className="w-16 bg-gradient-to-t from-emerald-600 to-emerald-500 rounded-t-lg border border-emerald-500" 
+                         style={{ height: `${Math.min(120, (newTax / 5000) * 120)}px` }}>
+                    </div>
+                    <span className="text-xs text-slate-400 mt-3 font-medium">2028 Tax</span>
+                  </div>
+                </div>
+                <div className="mt-6 pt-4 border-t border-slate-700 text-center">
+                  <p className="text-xs text-slate-400">
+                    <span className="font-medium">Your tax efficiency:</span> {newTax === currentTax ? 'Neutral' : newTax < currentTax ? '✓ Better in 2028' : '⚠️ Worse in 2028'}
+                  </p>
+                </div>
+              </div>
+
+              {/* Info Message */}
+              <div className="bg-slate-900/30 rounded-lg p-3 border border-slate-700">
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  <strong className="text-slate-300">ℹ️ Notice:</strong> This is an estimation tool based on the 2028 Box 3 proposal. Actual legislation may differ. Consult a tax advisor for personalized advice.
+                </p>
+              </div>
+
+              {/* Counter-Evidence Opportunity */}
+              {potentialRefund > 0 && (
+                <div className="bg-yellow-950/30 border border-yellow-700/50 rounded-lg p-4 mt-4">
+                  <p className="text-xs text-yellow-300 leading-relaxed">
+                    <strong className="text-yellow-200">💡 2024 Opportunity:</strong> You could potentially save €{Math.round(potentialRefund).toLocaleString()} by using the counter-evidence scheme if your actual returns are lower than the fictional rate.
+                  </p>
+                </div>
+              )}
             </div>
           </div>
 
