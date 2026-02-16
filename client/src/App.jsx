@@ -70,14 +70,14 @@ export default function App() {
     <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
       {/* Top Fixed Navigation Bar */}
       <nav className="fixed top-0 left-0 right-0 bg-slate-900/95 backdrop-blur-sm border-b border-slate-800 z-50">
-        <div className="max-w-7xl mx-auto px-6">
+        <div className="max-w-7xl mx-auto px-4 sm:px-6">
           <div className="flex items-center justify-between h-16">
             {/* Logo */}
             <div className="flex items-center gap-2">
-              <svg className="w-8 h-8 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <svg className="w-7 h-7 sm:w-8 sm:h-8 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M3 17l6-6 4 4 8-8M21 7v6h-6" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
-              <span className="text-xl font-bold text-white">ExitWay</span>
+              <span className="text-lg sm:text-xl font-bold text-white hidden sm:inline">ExitWay</span>
             </div>
 
             {/* Center Navigation Links */}
@@ -88,19 +88,19 @@ export default function App() {
             </div>
 
             {/* Right Side Actions */}
-            <div className="flex items-center gap-4">
+            <div className="flex items-center gap-2 sm:gap-4">
               {/* Language Dropdown */}
               <div className="relative">
                 <button
                   onClick={() => setShowLangDropdown(!showLangDropdown)}
-                  className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors px-3 py-2 rounded-lg hover:bg-slate-800"
+                  className="flex items-center gap-1 sm:gap-2 text-slate-400 hover:text-white transition-colors px-2 sm:px-3 py-2 rounded-lg hover:bg-slate-800"
                 >
-                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-4 h-4 sm:w-5 sm:h-5 hidden sm:block" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <circle cx="12" cy="12" r="10" strokeWidth="2"/>
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M2 12h20M12 2a15.3 15.3 0 014 10 15.3 15.3 0 01-4 10 15.3 15.3 0 01-4-10 15.3 15.3 0 014-10z" />
                   </svg>
-                  <span className="font-medium">{language === 'en' ? 'EN' : 'NL'}</span>
-                  <svg className={`w-4 h-4 transition-transform ${showLangDropdown ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <span className="font-medium text-sm sm:text-base">{language === 'en' ? 'EN' : 'NL'}</span>
+                  <svg className={`w-3 h-3 sm:w-4 sm:h-4 transition-transform ${showLangDropdown ? 'rotate-180' : ''}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 9l-7 7-7-7" />
                   </svg>
                 </button>
@@ -135,8 +135,9 @@ export default function App() {
                 )}
               </div>
               
-              <button className="bg-emerald-500 hover:bg-emerald-600 text-white font-medium px-6 py-2 rounded-lg transition-colors">
-                {t.nav.getStarted}
+              <button className="bg-emerald-500 hover:bg-emerald-600 text-white font-medium px-3 sm:px-6 py-2 rounded-lg transition-colors text-sm sm:text-base whitespace-nowrap">
+                <span className="hidden sm:inline">{t.nav.getStarted}</span>
+                <span className="sm:hidden">Start</span>
               </button>
             </div>
           </div>
@@ -144,7 +145,7 @@ export default function App() {
       </nav>
 
       {/* Main Content */}
-      <div className="pt-32 pb-12 px-6">
+      <div className="pt-32 pb-12 px-4 sm:px-6">
         <div className="max-w-7xl mx-auto">
           {/* Coming Soon Badge */}
           <div className="flex justify-center mb-8">
@@ -168,27 +169,27 @@ export default function App() {
           </div>
 
           {/* Timeline Indicator */}
-          <div className="flex items-center justify-center mb-20">
-            <div className="flex items-center gap-10">
+          <div className="flex items-center justify-center mb-12 sm:mb-20">
+            <div className="flex items-center gap-3 sm:gap-6 md:gap-8">
               {/* Now - Green */}
               <div className="flex flex-col items-center">
-                <div className="w-20 h-20 rounded-full border-4 border-emerald-500 bg-slate-900 flex items-center justify-center mb-3 shadow-lg shadow-emerald-500/30">
-                  <span className="text-emerald-500 font-bold text-lg">{t.hero.now}</span>
+                <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-full border-2 sm:border-3 border-emerald-500 bg-slate-900 flex items-center justify-center mb-2 shadow-lg shadow-emerald-500/30">
+                  <span className="text-emerald-500 font-bold text-sm sm:text-base">{t.hero.now}</span>
                 </div>
-                <span className="text-slate-400 text-sm font-medium">{t.hero.nowLabel}</span>
+                <span className="text-slate-400 text-xs sm:text-sm font-medium">{t.hero.nowLabel}</span>
               </div>
 
               {/* Progress Line */}
-              <div className="w-80 h-1 bg-slate-700 relative">
+              <div className="w-24 sm:w-48 md:w-64 h-1 bg-slate-700 relative">
                 <div className="absolute left-0 top-0 h-full w-1/3 bg-gradient-to-r from-emerald-500 to-slate-700"></div>
               </div>
 
               {/* 2028 - Red */}
               <div className="flex flex-col items-center">
-                <div className="w-20 h-20 rounded-full border-4 border-red-500 bg-slate-900 flex items-center justify-center mb-3 shadow-lg shadow-red-500/30">
-                  <span className="text-red-500 font-bold text-lg">{t.hero.year2028}</span>
+                <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-full border-2 sm:border-3 border-red-500 bg-slate-900 flex items-center justify-center mb-2 shadow-lg shadow-red-500/30">
+                  <span className="text-red-500 font-bold text-sm sm:text-base">{t.hero.year2028}</span>
                 </div>
-                <span className="text-slate-400 text-sm font-medium">{t.hero.year2028Label}</span>
+                <span className="text-slate-400 text-xs sm:text-sm font-medium">{t.hero.year2028Label}</span>
               </div>
             </div>
           </div>
@@ -210,10 +211,10 @@ export default function App() {
               </div>
 
               {/* Preset Tabs */}
-              <div className="flex gap-2 mb-8">
+              <div className="flex gap-1 sm:gap-2 mb-8">
                 <button
                   onClick={() => applyPreset('starter')}
-                  className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
+                  className={`flex-1 py-2 px-2 sm:py-2.5 sm:px-3 rounded-lg text-xs sm:text-sm font-medium transition-all ${
                     preset === 'starter'
                       ? 'bg-slate-700 text-white'
                       : 'bg-slate-900/50 text-slate-400 hover:bg-slate-700/50'
@@ -223,7 +224,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => applyPreset('growing')}
-                  className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
+                  className={`flex-1 py-2 px-2 sm:py-2.5 sm:px-3 rounded-lg text-xs sm:text-sm font-medium transition-all ${
                     preset === 'growing'
                       ? 'bg-slate-700 text-white'
                       : 'bg-slate-900/50 text-slate-400 hover:bg-slate-700/50'
@@ -233,7 +234,7 @@ export default function App() {
                 </button>
                 <button
                   onClick={() => applyPreset('established')}
-                  className={`flex-1 py-3 px-4 rounded-lg font-medium transition-all ${
+                  className={`flex-1 py-2 px-2 sm:py-2.5 sm:px-3 rounded-lg text-xs sm:text-sm font-medium transition-all ${
                     preset === 'established'
                       ? 'bg-slate-700 text-white'
                       : 'bg-slate-900/50 text-slate-400 hover:bg-slate-700/50'
@@ -733,53 +734,64 @@ export default function App() {
               </button>
             </div>
 
-            {/* Annual Plan */}
-            <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
-              <h3 className="text-2xl font-bold text-white mb-2">{t.pricing.annual}</h3>
-              <div className="mb-6">
-                <span className="text-5xl font-bold text-white">{t.pricing.annualPrice}</span>
-                <span className="text-slate-400 text-lg ml-2">{t.pricing.annualTime}</span>
+            {/* Annual Plan - Coming Soon */}
+            <div className="bg-slate-800/20 backdrop-blur-sm border border-slate-700/50 rounded-2xl p-8 relative opacity-60">
+              {/* Coming Soon Badge */}
+              <div className="absolute -top-4 left-1/2 transform -translate-x-1/2">
+                <div className="bg-slate-600 text-slate-300 text-sm font-semibold px-4 py-1 rounded-full flex items-center gap-1">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <circle cx="12" cy="12" r="10" strokeWidth="2"/>
+                    <path strokeWidth="2" strokeLinecap="round" d="M12 6v6l4 2"/>
+                  </svg>
+                  {language === 'en' ? 'Coming Soon' : 'Binnenkort'}
+                </div>
               </div>
-              <p className="text-slate-400 text-sm mb-8">
+
+              <h3 className="text-2xl font-bold text-slate-400 mb-2 mt-4">{t.pricing.annual}</h3>
+              <div className="mb-6">
+                <span className="text-5xl font-bold text-slate-400">{t.pricing.annualPrice}</span>
+                <span className="text-slate-500 text-lg ml-2">{t.pricing.annualTime}</span>
+              </div>
+              <p className="text-slate-500 text-sm mb-8">
                 {t.pricing.annualDesc}
               </p>
 
               {/* Features */}
               <ul className="space-y-4 mb-8">
                 <li className="flex items-start gap-3">
-                  <svg className="w-5 h-5 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5 text-slate-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
                   </svg>
-                  <span className="text-slate-300 text-sm">{t.pricing.feature11}</span>
+                  <span className="text-slate-500 text-sm">{t.pricing.feature11}</span>
                 </li>
                 <li className="flex items-start gap-3">
-                  <svg className="w-5 h-5 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5 text-slate-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
                   </svg>
-                  <span className="text-slate-300 text-sm">{t.pricing.feature12}</span>
+                  <span className="text-slate-500 text-sm">{t.pricing.feature12}</span>
                 </li>
                 <li className="flex items-start gap-3">
-                  <svg className="w-5 h-5 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5 text-slate-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
                   </svg>
-                  <span className="text-slate-300 text-sm">{t.pricing.feature13}</span>
+                  <span className="text-slate-500 text-sm">{t.pricing.feature13}</span>
                 </li>
                 <li className="flex items-start gap-3">
-                  <svg className="w-5 h-5 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5 text-slate-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
                   </svg>
-                  <span className="text-slate-300 text-sm">{t.pricing.feature14}</span>
+                  <span className="text-slate-500 text-sm">{t.pricing.feature14}</span>
                 </li>
                 <li className="flex items-start gap-3">
-                  <svg className="w-5 h-5 text-emerald-500 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <svg className="w-5 h-5 text-slate-600 mt-0.5 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
                   </svg>
-                  <span className="text-slate-300 text-sm">{t.pricing.feature15}</span>
+                  <span className="text-slate-500 text-sm">{t.pricing.feature15}</span>
                 </li>
               </ul>
 
-              <button className="w-full bg-slate-700 hover:bg-slate-600 text-white font-semibold py-3 px-6 rounded-xl transition-all">
-                {t.pricing.btnSubscribe}
+              <button disabled className="w-full bg-slate-700/50 text-slate-400 font-semibold py-3 px-6 rounded-xl cursor-not-allowed">
+                {language === 'en' ? 'Coming Soon' : 'Binnenkort'}
               </button>
             </div>
           </div>
