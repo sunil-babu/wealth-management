@@ -22,6 +22,7 @@ export default function App() {
   
   // Results state
   const [showResults, setShowResults] = useState(false);
+  const [showComparison, setShowComparison] = useState(false);
   const [aiResponse, setAiResponse] = useState('');
   const [metrics, setMetrics] = useState({
     monthlyNeed: 0,
@@ -305,12 +306,8 @@ PRODUCT_2_TYPE: [ETF|Fund]
 PRODUCT_2_DESC: [one sentence]
 ---
 
-Then write normal analysis with sections:
-**THE COST OF INACTION:** (tax drag, lost returns)
-**THE OPTIMIZED PATH:** (3 steps: immediate/medium/long-term)
-**ALLOCATION RATIONALE:** (explain stocks/bonds/RE/cash % for age ${formData.age}, ${formData.retirementAge - formData.age}yr timeline)
-
-Keep under 500 words. Use Dutch terms (Box 3, jaarruimte, lijfrente). Recommend VWRL/IWDA for Dutch investors.`;
+Then write a brief strategic summary in ONE paragraph (max 150 words):
+Focus on the most critical insight - either the biggest opportunity they're missing or the most impactful quick win. Mention specific Dutch tax terms (Box 3, jaarruimte, lijfrente) if relevant. Keep it actionable and motivating.`;
 
     setIsSubmitting(true);
     setLoadingMessageIndex(0);
@@ -633,12 +630,476 @@ Keep under 500 words. Use Dutch terms (Box 3, jaarruimte, lijfrente). Recommend 
     setCurrentStep('household');
   };
 
+  // Comparison Page UI
+  if (showComparison) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+          {/* Back Button */}
+          <button
+            onClick={() => setShowComparison(false)}
+            className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors mb-8"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+            Back to Results
+          </button>
+
+          {/* Header */}
+          <div className="text-center mb-12">
+            <h1 className="text-4xl sm:text-5xl font-bold text-white mb-4">
+              Why Choose AI-Powered Strategy?
+            </h1>
+            <p className="text-slate-400 text-lg max-w-2xl mx-auto">
+              Compare the modern approach with traditional financial advisory
+            </p>
+          </div>
+
+          {/* Comparison Table */}
+          <div className="bg-white rounded-2xl shadow-2xl overflow-hidden mb-8">
+            <div className="overflow-x-auto">
+              <table className="w-full">
+                <thead>
+                  <tr className="bg-gradient-to-r from-emerald-600 to-teal-600">
+                    <th className="px-6 py-4 text-left text-white font-bold text-lg">Feature</th>
+                    <th className="px-6 py-4 text-center text-white font-bold text-lg">
+                      <div className="flex items-center justify-center gap-2">
+                        <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
+                          <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
+                        </svg>
+                        Your AI Strategy PDF
+                      </div>
+                    </th>
+                    <th className="px-6 py-4 text-center text-white font-bold text-lg">Traditional NL Advisor</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {/* Cost Row */}
+                  <tr className="border-b border-slate-200">
+                    <td className="px-6 py-5 font-semibold text-slate-700">Cost</td>
+                    <td className="px-6 py-5 text-center bg-emerald-50">
+                      <div className="text-2xl font-bold text-emerald-600">€29</div>
+                      <div className="text-sm text-slate-600">(Launch Price)</div>
+                    </td>
+                    <td className="px-6 py-5 text-center">
+                      <div className="text-2xl font-bold text-slate-900">€1,000+</div>
+                      <div className="text-sm text-slate-600">Average</div>
+                    </td>
+                  </tr>
+
+                  {/* Speed Row */}
+                  <tr className="border-b border-slate-200">
+                    <td className="px-6 py-5 font-semibold text-slate-700">Speed</td>
+                    <td className="px-6 py-5 text-center bg-emerald-50">
+                      <div className="text-xl font-bold text-emerald-600">⚡ Instant</div>
+                    </td>
+                    <td className="px-6 py-5 text-center">
+                      <div className="text-xl font-bold text-slate-900">2-3 Weeks</div>
+                      <div className="text-sm text-slate-600">of Meetings</div>
+                    </td>
+                  </tr>
+
+                  {/* Accuracy Row */}
+                  <tr className="border-b border-slate-200">
+                    <td className="px-6 py-5 font-semibold text-slate-700">Accuracy</td>
+                    <td className="px-6 py-5 text-center bg-emerald-50">
+                      <div className="text-base font-bold text-emerald-600">Data-driven</div>
+                      <div className="text-sm text-slate-600">2026 Tax Logic</div>
+                    </td>
+                    <td className="px-6 py-5 text-center">
+                      <div className="text-base font-bold text-slate-900">Human-manual</div>
+                      <div className="text-sm text-slate-600">Calculation</div>
+                    </td>
+                  </tr>
+
+                  {/* Focus Row */}
+                  <tr>
+                    <td className="px-6 py-5 font-semibold text-slate-700">Focus</td>
+                    <td className="px-6 py-5 text-center bg-emerald-50">
+                      <div className="text-base font-bold text-emerald-600">10+ Global</div>
+                      <div className="text-sm text-slate-600">Relocation Paths</div>
+                    </td>
+                    <td className="px-6 py-5 text-center">
+                      <div className="text-base font-bold text-slate-900">Usually NL-only</div>
+                      <div className="text-sm text-slate-600">Focus (if needed)</div>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* What's Included in the PDF */}
+          <div className="space-y-8 my-12">
+            {/* Feature 1: Pension Sufficiency Audit */}
+            <div className="bg-slate-800 rounded-2xl p-6 sm:p-8 border border-slate-700">
+              <div className="flex items-start gap-4 mb-4">
+                <div className="flex-shrink-0 w-12 h-12 bg-emerald-500 rounded-xl flex items-center justify-center">
+                  <span className="text-white text-xl font-bold">1</span>
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-2xl font-bold text-white mb-3">Pension Sufficiency Audit</h3>
+                  <p className="text-slate-300 leading-relaxed mb-4">
+                    The AI will analyze if your current built-up capital and state benefits provide a sustainable lifestyle.
+                  </p>
+                  
+                  <div className="space-y-4 mt-6">
+                    <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
+                      <h4 className="text-emerald-400 font-semibold mb-2 flex items-center gap-2">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                        </svg>
+                        AOW Projections (2026)
+                      </h4>
+                      <p className="text-slate-300 text-sm leading-relaxed">
+                        For a single person, the net state pension is approximately <strong className="text-white">€1,558.15 per month</strong>; for couples, it is <strong className="text-white">€1,067.70 per person</strong>.
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
+                      <h4 className="text-emerald-400 font-semibold mb-2 flex items-center gap-2">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                        </svg>
+                        The "Gap" Analysis
+                      </h4>
+                      <p className="text-slate-300 text-sm leading-relaxed">
+                        The PDF compares your projected monthly expenses against your AOW and employer pension (Pillar 2). If there is a shortfall, the AI calculates exactly how much extra capital you need in your "nest egg" to bridge the gap until you reach the state pension age.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Feature 2: The "Bigger House" Tax Strategy */}
+            <div className="bg-slate-800 rounded-2xl p-6 sm:p-8 border border-slate-700">
+              <div className="flex items-start gap-4 mb-4">
+                <div className="flex-shrink-0 w-12 h-12 bg-emerald-500 rounded-xl flex items-center justify-center">
+                  <span className="text-white text-xl font-bold">2</span>
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-2xl font-bold text-white mb-3">The "Bigger House" Tax Strategy</h3>
+                  <p className="text-slate-300 leading-relaxed mb-4">
+                    Dutch law provides unique advantages for primary residences (Box 1) over other investments (Box 3).
+                  </p>
+                  
+                  <div className="space-y-4 mt-6">
+                    <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
+                      <h4 className="text-emerald-400 font-semibold mb-2 flex items-center gap-2">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+                        </svg>
+                        Asset Shelter
+                      </h4>
+                      <p className="text-slate-300 text-sm leading-relaxed">
+                        Money invested in a primary home is not subject to the heavy Box 3 wealth tax, which in 2026 assumes a high fictitious return of <strong className="text-white">7.78%</strong> on investments. Moving "taxable" wealth into a "tax-free" home can save you thousands annually.
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
+                      <h4 className="text-emerald-400 font-semibold mb-2 flex items-center gap-2">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        Mortgage Interest Deduction (HRA)
+                      </h4>
+                      <p className="text-slate-300 text-sm leading-relaxed">
+                        The PDF calculates your specific tax refund for a larger mortgage, which is currently capped at a deduction rate of <strong className="text-white">37.48%</strong>.
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
+                      <h4 className="text-emerald-400 font-semibold mb-2 flex items-center gap-2">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                        </svg>
+                        The "Buying vs. Investing" Verdict
+                      </h4>
+                      <p className="text-slate-300 text-sm leading-relaxed">
+                        AI models whether the HRA refund plus the Box 3 tax savings outweighs the potential 7–8% returns of the stock market.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Feature 3: Additional Tax-Saving Options */}
+            <div className="bg-slate-800 rounded-2xl p-6 sm:p-8 border border-slate-700">
+              <div className="flex items-start gap-4 mb-4">
+                <div className="flex-shrink-0 w-12 h-12 bg-emerald-500 rounded-xl flex items-center justify-center">
+                  <span className="text-white text-xl font-bold">3</span>
+                </div>
+                <div className="flex-1">
+                  <h3 className="text-2xl font-bold text-white mb-3">Additional Tax-Saving Options in the PDF</h3>
+                  <p className="text-slate-300 leading-relaxed mb-4">
+                    Include these "Pro" features to justify the advisor-level value:
+                  </p>
+                  
+                  <div className="space-y-4 mt-6">
+                    <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
+                      <h4 className="text-emerald-400 font-semibold mb-2 flex items-center gap-2">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                        </svg>
+                        Jaarruimte Optimization
+                      </h4>
+                      <p className="text-slate-300 text-sm leading-relaxed">
+                        Shows exactly how to use your 2026 private pension room to get an immediate tax refund of up to <strong className="text-white">49.5%</strong> on your contributions.
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
+                      <h4 className="text-emerald-400 font-semibold mb-2 flex items-center gap-2">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
+                        </svg>
+                        The "Rebuttal Scheme" (Tegenbewijsregeling)
+                      </h4>
+                      <p className="text-slate-300 text-sm leading-relaxed">
+                        If your actual investment returns in 2026 are lower than the government's assumed 7.78%, the PDF explains how to file for a tax reduction based on your real results.
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
+                      <h4 className="text-emerald-400 font-semibold mb-2 flex items-center gap-2">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
+                        </svg>
+                        Wealth Reallocation
+                      </h4>
+                      <p className="text-slate-300 text-sm leading-relaxed">
+                        Recommends shifting "Other Assets" into "Savings" before the October 1st cut-off to benefit from lower fictitious return rates (~1.44% vs 7.78%).
+                      </p>
+                    </div>
+
+                    <div className="bg-slate-900/50 rounded-lg p-4 border border-slate-700">
+                      <h4 className="text-emerald-400 font-semibold mb-2 flex items-center gap-2">
+                        <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
+                        </svg>
+                        Green Investment Credit
+                      </h4>
+                      <p className="text-slate-300 text-sm leading-relaxed">
+                        Identifies if you should use the <strong className="text-white">€26,715 exemption</strong> for "Groenbeleggen" (Green Investments) before this popular tax break is phased out in 2027/2028.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Additional Strategy Details */}
+          <div className="my-12 space-y-8">
+            {/* 1. The 2026 Strategy */}
+            <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-6 sm:p-8 border border-emerald-500/30 shadow-xl">
+              <div className="flex items-start gap-4 mb-6">
+                <div className="flex-shrink-0 w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center">
+                  <span className="text-white text-lg font-bold">1</span>
+                </div>
+                <h3 className="text-2xl font-bold text-white">The 2026 Strategy: "The Choice"</h3>
+              </div>
+              <p className="text-slate-300 leading-relaxed mb-6">
+                Currently, you are in a transition phase. You can often choose the most beneficial calculation:
+              </p>
+              <div className="space-y-4">
+                <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
+                  <h4 className="text-emerald-400 font-semibold mb-3 flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                    Counter-evidence Scheme (Tegenbewijsregeling)
+                  </h4>
+                  <p className="text-slate-300 text-sm leading-relaxed">
+                    If your actual investment returns are lower than the government's assumed rate (currently ~6%), you can provide evidence of your real gains to pay less tax.
+                  </p>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
+                  <h4 className="text-emerald-400 font-semibold mb-3 flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
+                    </svg>
+                    Pillar 3 Pension Boost
+                  </h4>
+                  <p className="text-slate-300 text-sm leading-relaxed">
+                    For 2026, the maximum Jaarruimte (tax-deductible pension room) is set at <strong className="text-white">€35,589</strong>. This is a "double win": you get a tax refund of up to <strong className="text-white">49.5%</strong> now and the assets are exempt from Box 3 tax forever.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* 2. The 2028 Revolution */}
+            <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-6 sm:p-8 border border-emerald-500/30 shadow-xl">
+              <div className="flex items-start gap-4 mb-6">
+                <div className="flex-shrink-0 w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center">
+                  <span className="text-white text-lg font-bold">2</span>
+                </div>
+                <h3 className="text-2xl font-bold text-white">The 2028 Revolution: "Actual Gains"</h3>
+              </div>
+              <p className="text-slate-300 leading-relaxed mb-6">
+                On February 12, 2026, the Dutch Parliament approved the "Wet werkelijk rendement box 3," set to launch on January 1, 2028. This creates two new regimes:
+              </p>
+              <div className="overflow-x-auto">
+                <table className="w-full border-collapse">
+                  <thead>
+                    <tr className="bg-emerald-500/20 border-b-2 border-emerald-500">
+                      <th className="text-left p-4 text-emerald-400 font-semibold">Asset Type</th>
+                      <th className="text-left p-4 text-emerald-400 font-semibold">2028 Tax Model</th>
+                      <th className="text-left p-4 text-emerald-400 font-semibold">Impact</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    <tr className="border-b border-slate-700 hover:bg-slate-800/50 transition-colors">
+                      <td className="p-4 text-white font-medium">Stocks, Crypto, Bonds</td>
+                      <td className="p-4 text-slate-300">Capital Growth Tax (Vermogensaanwas)</td>
+                      <td className="p-4 text-slate-300">You pay tax annually on unrealized gains (paper profits), even if you don't sell.</td>
+                    </tr>
+                    <tr className="border-b border-slate-700 hover:bg-slate-800/50 transition-colors">
+                      <td className="p-4 text-white font-medium">Real Estate & Startups</td>
+                      <td className="p-4 text-slate-300">Capital Gains Tax (Vermogenswinst)</td>
+                      <td className="p-4 text-slate-300">You only pay tax on the profit when you sell the property or shares.</td>
+                    </tr>
+                    <tr className="hover:bg-slate-800/50 transition-colors">
+                      <td className="p-4 text-white font-medium">Bank Savings</td>
+                      <td className="p-4 text-slate-300">Actual Interest</td>
+                      <td className="p-4 text-slate-300">You pay 36% tax only on the interest you actually received.</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+
+            {/* 3. Critical Life Engineering Options */}
+            <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-2xl p-6 sm:p-8 border border-emerald-500/30 shadow-xl">
+              <div className="flex items-start gap-4 mb-6">
+                <div className="flex-shrink-0 w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center">
+                  <span className="text-white text-lg font-bold">3</span>
+                </div>
+                <h3 className="text-2xl font-bold text-white">Critical "Life Engineering" Options for the PDF</h3>
+              </div>
+              <p className="text-slate-300 leading-relaxed mb-6">
+                To protect your wealth during this shift, the PDF should analyze these advanced options:
+              </p>
+              <div className="space-y-4">
+                <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
+                  <h4 className="text-emerald-400 font-semibold mb-3 flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
+                    </svg>
+                    The "House as a Safe Haven"
+                  </h4>
+                  <p className="text-slate-300 text-sm leading-relaxed">
+                    Since primary residences stay in Box 1, they are shielded from the new 2028 Box 3 rules. Moving "excess" investment capital into home equity could prevent the "Capital Growth Tax" from eating your paper profits.
+                  </p>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
+                  <h4 className="text-emerald-400 font-semibold mb-3 flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                    </svg>
+                    Strategic Loss Harvesting
+                  </h4>
+                  <p className="text-slate-300 text-sm leading-relaxed">
+                    From 2028, losses are deductible and can be carried forward to offset future gains. The AI can model when to "lock in" a loss to lower your future tax bills.
+                  </p>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
+                  <h4 className="text-emerald-400 font-semibold mb-3 flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+                    </svg>
+                    Wealth Transfer (Gifting)
+                  </h4>
+                  <p className="text-slate-300 text-sm leading-relaxed">
+                    In 2026, you can gift children <strong className="text-white">€6,908 annually</strong> or a one-time tax-free sum of <strong className="text-white">€33,129</strong> (if they are under 40). Doing this before 2028 reduces the total assets subject to the new "unrealized gains" tax.
+                  </p>
+                </div>
+                <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
+                  <h4 className="text-emerald-400 font-semibold mb-3 flex items-center gap-2">
+                    <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+                    </svg>
+                    Factor A Audit
+                  </h4>
+                  <p className="text-slate-300 text-sm leading-relaxed">
+                    The PDF will check your Factor A (employer pension growth) to see if you have "Reserveringsruimte"—unused tax-deductible room from the last 10 years (up to <strong className="text-white">€42,753 in 2026</strong>).
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* CTA Section */}
+          <div className="bg-gradient-to-r from-emerald-600 to-teal-600 rounded-2xl p-8 text-center">
+            <h2 className="text-2xl sm:text-3xl font-bold text-white mb-4">
+              Ready to Get Your Full Strategy?
+            </h2>
+            <p className="text-emerald-50 mb-6 text-lg">
+              Download your personalized PDF roadmap with detailed action steps
+            </p>
+            <div className="flex flex-col sm:flex-row gap-4 justify-center items-center">
+              <button className="bg-white hover:bg-emerald-50 text-emerald-600 font-bold px-8 py-4 rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105 text-lg">
+                Purchase PDF for €29 →
+              </button>
+              <button
+                onClick={() => setShowComparison(false)}
+                className="text-white hover:text-emerald-100 underline font-medium"
+              >
+                Maybe later
+              </button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   // Results Page UI
   if (showResults) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
         {/* Main Content */}
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
+          {/* Special Offer Banner */}
+          <div className="mb-8 sm:mb-10">
+            <div className="bg-gradient-to-r from-emerald-600 to-teal-600 rounded-2xl p-6 sm:p-8 border-2 border-emerald-400 shadow-2xl relative overflow-hidden">
+              {/* Background decoration */}
+              <div className="absolute top-0 right-0 w-32 h-32 bg-white/10 rounded-full -mr-16 -mt-16"></div>
+              <div className="absolute bottom-0 left-0 w-24 h-24 bg-white/10 rounded-full -ml-12 -mb-12"></div>
+              
+              <div className="relative z-10 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="flex-1 text-center sm:text-left">
+                  <div className="inline-flex items-center gap-2 px-3 py-1 bg-yellow-400 text-yellow-900 rounded-full text-xs font-bold mb-3">
+                    <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
+                      <path fillRule="evenodd" d="M12.395 2.553a1 1 0 00-1.45-.385c-.345.23-.614.558-.822.88-.214.33-.403.713-.57 1.116-.334.804-.614 1.768-.84 2.734a31.365 31.365 0 00-.613 3.58 2.64 2.64 0 01-.945-1.067c-.328-.68-.398-1.534-.398-2.654A1 1 0 005.05 6.05 6.981 6.981 0 003 11a7 7 0 1011.95-4.95c-.592-.591-.98-.985-1.348-1.467-.363-.476-.724-1.063-1.207-2.03zM12.12 15.12A3 3 0 017 13s.879.5 2.5.5c0-1 .5-4 1.25-4.5.5 1 .786 1.293 1.371 1.879A2.99 2.99 0 0113 13a2.99 2.99 0 01-.879 2.121z" clipRule="evenodd" />
+                    </svg>
+                    <span>LIMITED TIME OFFER</span>
+                  </div>
+                  <h2 className="text-xl sm:text-2xl font-bold text-white mb-2">
+                    2026 Strategy Launch Offer
+                  </h2>
+                  <p className="text-emerald-50 text-sm sm:text-base">
+                    Get your full PDF Roadmap for <span className="font-bold text-white text-lg">€19.99</span> <span className="line-through opacity-75">(Normally €99)</span>
+                  </p>
+                  <p className="text-emerald-100 text-xs sm:text-sm mt-2">
+                    ⏰ This <strong>80% discount</strong> expires in 2 weeks
+                  </p>
+                </div>
+                <div className="flex-shrink-0">
+                  <button 
+                    onClick={() => setShowComparison(true)}
+                    className="bg-white hover:bg-emerald-50 text-emerald-600 font-bold px-6 sm:px-8 py-3 sm:py-4 rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105 text-sm sm:text-base"
+                  >
+                    Get Full PDF Roadmap →
+                  </button>
+                </div>
+              </div>
+            </div>
+          </div>
+
           {/* Header Badge */}
           <div className="flex justify-center mb-6 sm:mb-8">
             <div className="inline-flex items-center gap-2 px-4 py-2 bg-amber-500/10 border border-amber-500/30 rounded-full">
