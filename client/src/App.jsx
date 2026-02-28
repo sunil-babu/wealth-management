@@ -106,6 +106,7 @@ export default function App() {
     retirementAge: 67,
     country: 'Netherlands',
     hasSpouse: false,
+    spouseGrossSalary: 0,
     hasChildren: false,
     childrenCount: 0,
     // Financials (legacy)
@@ -133,11 +134,31 @@ export default function App() {
     // Dutch Tax
     jaarruimte: 0,
     factorA: 0,
+    spouseFactorA: 0,
+    spouseJaarruimte: 0,
+    // Pillar 1 - State Pension
+    arrivalAgeNL: 0,
+    yearsAbroad: 0,
+    spouseArrivalAgeNL: 0,
+    spouseYearsAbroad: 0,
+    // Pillar 2 - Workplace Pension
+    builtUpPension: 0,
+    spouseBuiltUpPension: 0,
+    // Pillar 3 - Private Pension
+    reserveringsruimte: 0,
+    spouseReserveringsruimte: 0,
     // Real Estate (legacy)
     homeValue: 0,
     mortgageBalance: 0,
     mortgageInterestRate: 0,
-    mortgageYearsLeft: 0
+    mortgageYearsLeft: 0,
+    // Upgrade Scenario
+    targetPropertyValue: 0,
+    plannedMoveDate: '',
+    // Retirement
+    targetRetirementAge: 55,
+    desiredMonthlyIncome: 3000,
+    lifeExpectancy: 90
   });
 
   const t = translations[language];
@@ -340,7 +361,7 @@ export default function App() {
       if (formData.debtInterest === null || formData.debtInterest === undefined) {
         formData.debtInterest = 0;
       }
-    } else if (step === 'dutchTax') {
+    } else if (step === 'pension') {
       if (formData.jaarruimte === '' || formData.jaarruimte === null || formData.jaarruimte === undefined) {
         errors.jaarruimte = 'Jaarruimte is required (can be 0)';
       }
@@ -373,6 +394,13 @@ export default function App() {
       if (formData.priorYearLoss === null || formData.priorYearLoss === undefined) {
         formData.priorYearLoss = 0;
       }
+    } else if (step === 'retirement') {
+      if (!formData.targetRetirementAge || formData.targetRetirementAge < 30 || formData.targetRetirementAge > 80) {
+        errors.targetRetirementAge = 'Please enter a valid retirement age (30-80)';
+      }
+      if (!formData.desiredMonthlyIncome || formData.desiredMonthlyIncome < 0) {
+        errors.desiredMonthlyIncome = 'Please enter your desired monthly income';
+      }
     }
     
     return errors;
@@ -399,10 +427,12 @@ export default function App() {
     if (currentStep === 'household') {
       setCurrentStep('financials');
     } else if (currentStep === 'financials') {
-      setCurrentStep('dutchTax');
-    } else if (currentStep === 'dutchTax') {
+      setCurrentStep('pension');
+    } else if (currentStep === 'pension') {
       setCurrentStep('realEstate');
     } else if (currentStep === 'realEstate') {
+      setCurrentStep('retirement');
+    } else if (currentStep === 'retirement') {
       // Submit to Vertex AI
       await submitToVertexAI();
     }
@@ -411,10 +441,12 @@ export default function App() {
   const handleBack = () => {
     if (currentStep === 'financials') {
       setCurrentStep('household');
-    } else if (currentStep === 'dutchTax') {
+    } else if (currentStep === 'pension') {
       setCurrentStep('financials');
     } else if (currentStep === 'realEstate') {
-      setCurrentStep('dutchTax');
+      setCurrentStep('pension');
+    } else if (currentStep === 'retirement') {
+      setCurrentStep('realEstate');
     }
   };
 
@@ -427,68 +459,79 @@ export default function App() {
     const taxFreeAllowance = formData.hasSpouse ? 114000 : 57000; // 2026 allowance
     const taxableBase = Math.max(0, totalBox3Assets - taxFreeAllowance);
 
-    const prompt = `You are a Dutch FIRE expert. Analyze this profile and provide tax-optimized wealth strategy.
+    const aowPct = Math.max(0, Math.min(100, (50 - formData.yearsAbroad) * 2));
+    const bridgeYrs = Math.max(0, Math.round((67.25 - formData.targetRetirementAge) * 10) / 10);
+    const bridgeCost = Math.round(bridgeYrs * 12 * formData.desiredMonthlyIncome);
+    const netWealth = formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue - formData.mortgageBalance;
+    const p3Room = formData.jaarruimte + formData.reserveringsruimte;
+    const equity = formData.propertyValue - formData.mortgageBalance;
+    const aowShortfall = Math.round((1 - aowPct / 100) * 1637);
 
-HOUSEHOLD:
-Age: ${formData.age} → Retire: ${formData.retirementAge} | ${formData.hasSpouse ? 'Partnered' : 'Single'}${formData.hasChildren ? `, ${formData.childrenCount} kids` : ''} | Salary: €${formData.grossSalary} | 30% Ruling: ${formData.has30PercentRuling ? 'Yes' : 'No'}
+    const prompt = `Dutch FIRE & Tax Architect. Analyze profile, find Wealth Leakage, provide 2026-optimized early retirement roadmap.
 
-DETAILED FINANCIAL BREAKDOWN:
-Bank & Savings: €${formData.savingsBalance} (Interest earned: €${formData.interestEarned})
-Stocks & Crypto: €${formData.cryptoValueDec31} (Jan 1 value: €${formData.cryptoValueJan1}, Dividends: €${formData.dividendsReceived})
-Real Estate: €${formData.propertyValue} (Rental income: €${formData.rentalIncome}, Sale proceeds: €${formData.saleProceeds}, Purchase price: €${formData.purchasePrice})
-Deductions: Interest on debt: €${formData.debtInterest}
-Loss Carry-Forward: €${formData.priorYearLoss}
+2026-27: Fictitious rates (Savings 1.44%, Assets 6%, Debt 2.62%). 2028+: Actual Returns (36% on real gains). Exemption €${formData.hasSpouse ? '114k' : '57k'}.
 
-TAX COMPARISON (2024 vs 2028):
-2024 System (Fictional Yield): €${calculate2024Tax()} per year
-2028 System (Actual Returns): €${calculate2028Tax()} per year
-Difference: ${newTax > currentTax ? '+' : ''}€${newTax - currentTax} per year
+PROFILE: Age ${formData.age} | FIRE ${formData.targetRetirementAge} | Need €${formData.desiredMonthlyIncome}/mo | Plan to ${formData.lifeExpectancy} | ${formData.hasSpouse ? 'Partnered' : 'Single'}${formData.hasChildren ? ` ${formData.childrenCount}kids` : ''} | Salary €${formData.grossSalary}${formData.hasSpouse ? ` Spouse €${formData.spouseGrossSalary}` : ''} | 30%Rule: ${formData.has30PercentRuling ? 'Y' : 'N'}
+ASSETS: Bank €${formData.savingsBalance} (int €${formData.interestEarned}) | Crypto Jan€${formData.cryptoValueJan1}→Dec€${formData.cryptoValueDec31} | Div €${formData.dividendsReceived} | DebtInt €${formData.debtInterest}
+PROPERTY: WOZ €${formData.propertyValue} Mortgage €${formData.mortgageBalance}@${formData.mortgageInterestRate}% ${formData.mortgageYearsLeft}yr | Equity €${equity}${formData.targetPropertyValue > 0 ? ` | Upgrade €${formData.targetPropertyValue}` : ''} | Rental €${formData.rentalIncome} Sale €${formData.saleProceeds} Cost €${formData.purchasePrice} | Loss €${formData.priorYearLoss}
+PENSION: P1 AOW ${aowPct}% (abroad ${formData.yearsAbroad}yr, gap €${aowShortfall}/mo)${formData.hasSpouse ? ` Spouse ${Math.max(0, Math.min(100, (50 - formData.spouseYearsAbroad) * 2))}%` : ''} | P2 €${formData.builtUpPension}/yr FactorA €${formData.factorA}${formData.hasSpouse ? ` Sp €${formData.spouseBuiltUpPension}/yr FA €${formData.spouseFactorA}` : ''} | P3 Jaar €${formData.jaarruimte} Res €${formData.reserveringsruimte}${formData.hasSpouse ? ` Sp J€${formData.spouseJaarruimte} R€${formData.spouseReserveringsruimte}` : ''}
+RETIRE: Bridge ${Math.round(bridgeYrs)}yr = €${bridgeCost.toLocaleString()} self-funded | Wealth €${netWealth.toLocaleString()} | SWR need €${Math.round(formData.desiredMonthlyIncome * 12 / 0.04).toLocaleString()}@4%
 
-REAL ESTATE:
-Home Value: €${formData.homeValue}, Mortgage: €${formData.mortgageBalance} @ ${formData.mortgageInterestRate}%, ${formData.mortgageYearsLeft} years left
+TASKS: (1) Bridge cost age ${formData.targetRetirementAge}→67 (2) AOW gap from ${formData.yearsAbroad}yr abroad (3) 2028 stress test on crypto/stocks (4) Box 3 tax drag (5) House-as-shield from €${equity} equity (6) SWR over ${formData.lifeExpectancy - formData.targetRetirementAge}yr
 
-TAX PARAMETERS:
-Jaarruimte (Pension room): €${formData.jaarruimte}, Factor A (Employer pension): €${formData.factorA}
-
-OUTPUT (exact format):
-MONTHLY_NEED: [number]
-TARGET_NEST_EGG: [number]
-GAP_TO_FILL: [number]
-MONTHLY_SAVINGS_TARGET: [number]
+OUTPUT FORMAT:
+MONTHLY_NEED: ${formData.desiredMonthlyIncome}
+TARGET_NEST_EGG: [total capital to retire at ${formData.targetRetirementAge} until ${formData.lifeExpectancy}]
+GAP_TO_FILL: [shortfall vs target]
+MONTHLY_SAVINGS_TARGET: [to close gap]
 ALLOCATION_STOCKS: [0-100]
 ALLOCATION_BONDS: [0-100]
 ALLOCATION_REAL_ESTATE: [0-100]
 ALLOCATION_CASH: [0-100]
-CURRENT_WEALTH: ${formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue}
+CURRENT_WEALTH: ${netWealth}
 PROJECTED_AT_RETIREMENT: [number]
+
 ---ACTIONS---
-ACTION_STEP_1_TITLE: [title]
-ACTION_STEP_1_PRIORITY: [High Priority|Medium Priority|Low Priority]
-ACTION_STEP_1_TAG: [NL Tax|Strategy|Tax Hack]
-ACTION_STEP_1_DESC: [one sentence]
-ACTION_STEP_2_TITLE: [title]
-ACTION_STEP_2_PRIORITY: [High Priority|Medium Priority|Low Priority]
-ACTION_STEP_2_TAG: [NL Tax|Strategy|Tax Hack]
-ACTION_STEP_2_DESC: [one sentence]
-ACTION_STEP_3_TITLE: [title]
-ACTION_STEP_3_PRIORITY: [High Priority|Medium Priority|Low Priority]
-ACTION_STEP_3_TAG: [NL Tax|Strategy|Tax Hack]
-ACTION_STEP_3_DESC: [one sentence]
+ACTION_STEP_1_TITLE: Bridge Phase Strategy
+ACTION_STEP_1_PRIORITY: Critical
+ACTION_STEP_1_TAG: Retirement
+ACTION_STEP_1_DESC: Need €${bridgeCost.toLocaleString()} for ${Math.round(bridgeYrs)} bridge years at €${formData.desiredMonthlyIncome}/mo before AOW. Recommend specific fund/approach.
+
+ACTION_STEP_2_TITLE: Maximize Pillar 3
+ACTION_STEP_2_PRIORITY: High Priority
+ACTION_STEP_2_TAG: NL Tax
+ACTION_STEP_2_DESC: €${p3Room} combined room. Immediate 37-49.5% refund + Box 3 shield.
+
+ACTION_STEP_3_TITLE: Box 1 vs Box 3 Shelter
+ACTION_STEP_3_PRIORITY: Medium Priority
+ACTION_STEP_3_TAG: Strategy
+ACTION_STEP_3_DESC: €${equity.toLocaleString()} equity. Optimize mortgage vs Box 3 exposure vs HRA.
+
+ACTION_STEP_4_TITLE: 2028 Preparation
+ACTION_STEP_4_PRIORITY: High Priority
+ACTION_STEP_4_TAG: Tax Hack
+ACTION_STEP_4_DESC: Tegenbewijsregeling if real gains <6%. Restructure before regime shift.
+
+ACTION_STEP_5_TITLE: Safe Withdrawal Plan
+ACTION_STEP_5_PRIORITY: High Priority
+ACTION_STEP_5_TAG: Retirement
+ACTION_STEP_5_DESC: €${formData.desiredMonthlyIncome}/mo over ${formData.lifeExpectancy - formData.targetRetirementAge}yr. Adjust SWR for Dutch tax/inflation.
+
 ---DUTCH_TAX---
-BOX3_STRATEGY: [2-3 sentences on Box 3 optimization considering 2024 fictional yield vs 2028 actual returns system]
-PENSION_RECOMMENDATIONS: [2-3 sentences on jaarruimte/lijfrente]
-ESTIMATED_ANNUAL_BOX3_TAX: [number]
+BOX3_STRATEGY: Savings vs Assets split. Box 3 total €${formData.savingsBalance + formData.cryptoValueDec31}. Optimize before 2028.
+PENSION_RECOMMENDATIONS: AOW ${aowPct}% (gap €${aowShortfall}/mo). Bridge via Lijfrente + P2 €${Math.round(formData.builtUpPension / 12)}/mo.
+ESTIMATED_ANNUAL_BOX3_TAX: [Calculate: 36% × (Stocks×0.06 + Savings×0.0144 - Debt×0.0262) minus exemption]
+
 ---PRODUCTS---
-PRODUCT_1_NAME: [fund name]
-PRODUCT_1_TYPE: [ETF|Fund]
-PRODUCT_1_DESC: [one sentence]
-PRODUCT_2_NAME: [fund name]
-PRODUCT_2_TYPE: [ETF|Fund]
-PRODUCT_2_DESC: [one sentence]
+PRODUCT_1_NAME: Brand New Day (Lijfrente)
+PRODUCT_1_TYPE: Pension Fund
+PRODUCT_1_DESC: Low-cost index Lijfrente for Jaarruimte/Reserveringsruimte.
+PRODUCT_2_NAME: Meesman Indexbeleggen
+PRODUCT_2_TYPE: Fund
+PRODUCT_2_DESC: Box 3 friendly via fiscal transparency.
 ---
 
-Then write a brief strategic summary in ONE paragraph (max 150 words):
-Focus on the most critical insight - either the biggest opportunity they're missing or the most impactful quick win. Mention specific Dutch tax terms (Box 3, jaarruimte, lijfrente) if relevant. Keep it actionable and motivating.`;
+STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetirementAge}→AOW, Box 3 optimization pre-2028, Pillar 3 maximization, AOW gap, SWR sustainability. Actionable € amounts.`;
 
     setIsSubmitting(true);
     setLoadingMessageIndex(0);
@@ -530,6 +573,10 @@ Focus on the most critical insight - either the biggest opportunity they're miss
       } else {
         responseText = JSON.stringify(result, null, 2);
       }
+      
+      console.log('=== RAW AI RESPONSE (first 2000 chars) ===');
+      console.log(responseText.substring(0, 2000));
+      console.log('=== END RAW RESPONSE ===');
       
       // Parse metrics from response
       const metricsParsed = {
@@ -590,147 +637,110 @@ Focus on the most critical insight - either the biggest opportunity they're miss
           continue; // Skip separator lines
         }
         
-        // Parse based on current section
-        if (currentSection === 'metrics' || currentSection === 'actions' || currentSection === 'dutch_tax' || currentSection === 'products') {
-          // Check if this is a metric line
-          if (trimmedLine.startsWith('MONTHLY_NEED:')) {
-            const match = trimmedLine.match(/MONTHLY_NEED:\s*€?([\d,]+)/i);
-            if (match) metricsParsed.monthlyNeed = parseInt(match[1].replace(/,/g, ''));
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('TARGET_NEST_EGG:')) {
-            const match = trimmedLine.match(/TARGET_NEST_EGG:\s*€?([\d,]+)/i);
-            if (match) metricsParsed.targetNestEgg = parseInt(match[1].replace(/,/g, ''));
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('GAP_TO_FILL:')) {
-            const match = trimmedLine.match(/GAP_TO_FILL:\s*€?([\d,]+)/i);
-            if (match) metricsParsed.gapToFill = parseInt(match[1].replace(/,/g, ''));
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('MONTHLY_SAVINGS_TARGET:')) {
-            const match = trimmedLine.match(/MONTHLY_SAVINGS_TARGET:\s*€?([\d,]+)/i);
-            if (match) metricsParsed.monthlySavingsTarget = parseInt(match[1].replace(/,/g, ''));
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('ALLOCATION_STOCKS:')) {
-            const match = trimmedLine.match(/ALLOCATION_STOCKS:\s*(\d+)/i);
-            if (match) allocationParsed.stocks = parseInt(match[1]);
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('ALLOCATION_BONDS:')) {
-            const match = trimmedLine.match(/ALLOCATION_BONDS:\s*(\d+)/i);
-            if (match) allocationParsed.bonds = parseInt(match[1]);
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('ALLOCATION_REAL_ESTATE:')) {
-            const match = trimmedLine.match(/ALLOCATION_REAL_ESTATE:\s*(\d+)/i);
-            if (match) allocationParsed.realEstate = parseInt(match[1]);
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('ALLOCATION_CASH:')) {
-            const match = trimmedLine.match(/ALLOCATION_CASH:\s*(\d+)/i);
-            if (match) allocationParsed.cash = parseInt(match[1]);
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('CURRENT_WEALTH:')) {
-            const match = trimmedLine.match(/CURRENT_WEALTH:\s*€?([\d,]+)/i);
-            if (match) projectionParsed.currentWealth = parseInt(match[1].replace(/,/g, ''));
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('PROJECTED_AT_RETIREMENT:')) {
-            const match = trimmedLine.match(/PROJECTED_AT_RETIREMENT:\s*€?([\d,]+)/i);
-            if (match) projectionParsed.projectedAtRetirement = parseInt(match[1].replace(/,/g, ''));
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('ACTION_STEP_')) {
-            const stepMatch = trimmedLine.match(/ACTION_STEP_(\d+)_(TITLE|PRIORITY|TAG|DESC):\s*(.+)/i);
-            if (stepMatch) {
-              const stepNum = parseInt(stepMatch[1]) - 1;
-              const field = stepMatch[2].toLowerCase();
-              const value = stepMatch[3].trim();
-              
-              if (!actionStepsParsed[stepNum]) {
-                actionStepsParsed[stepNum] = { title: '', priority: '', tag: '', description: '' };
-              }
-              
-              if (field === 'title') actionStepsParsed[stepNum].title = value;
-              else if (field === 'priority') actionStepsParsed[stepNum].priority = value;
-              else if (field === 'tag') actionStepsParsed[stepNum].tag = value;
-              else if (field === 'desc') actionStepsParsed[stepNum].description = value;
-            }
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('BOX3_STRATEGY:')) {
-            // Save any pending multi-line field
-            if (currentMultiLineField) {
-              if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
-              else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
+        // Parse structured data lines — always check regardless of current section
+        // This handles AI responses that mix prose with structured output
+        // Strip markdown bold markers and leading bullet markers for parsing
+        const cleanLine = trimmedLine.replace(/\*\*/g, '').replace(/^[-•*]\s*/, '').trim();
+        
+        // Debug: log lines that look like they contain metric keys
+        if (/MONTHLY_NEED|TARGET_NEST|GAP_TO|MONTHLY_SAVINGS/i.test(cleanLine)) {
+          console.log('METRIC LINE FOUND:', JSON.stringify(cleanLine));
+        }
+        
+        if (cleanLine.match(/^MONTHLY_NEED[:\s]/i)) {
+          const match = cleanLine.match(/MONTHLY_NEED:?\s*[€$]?([\d,\.]+)/i);
+          if (match) metricsParsed.monthlyNeed = parseInt(match[1].replace(/[,\.]/g, ''));
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^TARGET_NEST_EGG[:\s]/i)) {
+          const match = cleanLine.match(/TARGET_NEST_EGG:?\s*[€$]?([\d,\.]+)/i);
+          if (match) metricsParsed.targetNestEgg = parseInt(match[1].replace(/[,\.]/g, ''));
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^GAP_TO_FILL[:\s]/i)) {
+          const match = cleanLine.match(/GAP_TO_FILL:?\s*[€$]?([\d,\.]+)/i);
+          if (match) metricsParsed.gapToFill = parseInt(match[1].replace(/[,\.]/g, ''));
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^MONTHLY_SAVINGS_TARGET[:\s]/i)) {
+          const match = cleanLine.match(/MONTHLY_SAVINGS_TARGET:?\s*[€$]?([\d,\.]+)/i);
+          if (match) metricsParsed.monthlySavingsTarget = parseInt(match[1].replace(/[,\.]/g, ''));
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^ALLOCATION_STOCKS[:\s]/i)) {
+          const match = cleanLine.match(/ALLOCATION_STOCKS:?\s*(\d+)%?/i);
+          if (match) allocationParsed.stocks = parseInt(match[1]);
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^ALLOCATION_BONDS[:\s]/i)) {
+          const match = cleanLine.match(/ALLOCATION_BONDS:?\s*(\d+)%?/i);
+          if (match) allocationParsed.bonds = parseInt(match[1]);
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^ALLOCATION_REAL_ESTATE[:\s]/i)) {
+          const match = cleanLine.match(/ALLOCATION_REAL_ESTATE:?\s*(\d+)%?/i);
+          if (match) allocationParsed.realEstate = parseInt(match[1]);
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^ALLOCATION_CASH[:\s]/i)) {
+          const match = cleanLine.match(/ALLOCATION_CASH:?\s*(\d+)%?/i);
+          if (match) allocationParsed.cash = parseInt(match[1]);
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^CURRENT_WEALTH[:\s]/i)) {
+          const match = cleanLine.match(/CURRENT_WEALTH:?\s*[€$]?([\d,\.]+)/i);
+          if (match) projectionParsed.currentWealth = parseInt(match[1].replace(/[,\.]/g, ''));
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^PROJECTED_AT_RETIREMENT[:\s]/i)) {
+          const match = cleanLine.match(/PROJECTED_AT_RETIREMENT:?\s*[€$]?([\d,\.]+)/i);
+          if (match) projectionParsed.projectedAtRetirement = parseInt(match[1].replace(/[,\.]/g, ''));
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^ACTION_STEP_/i)) {
+          const stepMatch = cleanLine.match(/ACTION_STEP_(\d+)_(TITLE|PRIORITY|TAG|DESC):?\s*(.+)/i);
+          if (stepMatch) {
+            const stepNum = parseInt(stepMatch[1]) - 1;
+            const field = stepMatch[2].toLowerCase();
+            const value = stepMatch[3].trim();
+            
+            if (!actionStepsParsed[stepNum]) {
+              actionStepsParsed[stepNum] = { title: '', priority: '', tag: '', description: '' };
             }
             
-            const match = trimmedLine.match(/BOX3_STRATEGY:\s*(.+)/i);
-            currentMultiLineField = 'box3Strategy';
-            currentMultiLineValue = match && match[1] ? match[1].trim() : '';
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('PENSION_RECOMMENDATIONS:')) {
-            // Save any pending multi-line field
-            if (currentMultiLineField) {
-              if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
-              else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
-            }
-            
-            const match = trimmedLine.match(/PENSION_RECOMMENDATIONS:\s*(.+)/i);
-            currentMultiLineField = 'pensionRecommendations';
-            currentMultiLineValue = match && match[1] ? match[1].trim() : '';
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('ESTIMATED_ANNUAL_BOX3_TAX:')) {
-            // Save any pending multi-line field
-            if (currentMultiLineField) {
-              if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
-              else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
-              currentMultiLineField = null;
-              currentMultiLineValue = '';
-            }
-            
-            const match = trimmedLine.match(/ESTIMATED_ANNUAL_BOX3_TAX:\s*€?([\d,]+)/i);
-            if (match) dutchTaxParsed.estimatedAnnualTax = parseInt(match[1].replace(/,/g, ''));
-            foundMetrics = true;
-            continue;
-          } else if (trimmedLine.startsWith('PRODUCT_')) {
-            // Save any pending multi-line field
-            if (currentMultiLineField) {
-              if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
-              else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
-              currentMultiLineField = null;
-              currentMultiLineValue = '';
-            }
-            
-            const prodMatch = trimmedLine.match(/PRODUCT_(\d+)_(NAME|TYPE|DESC):\s*(.+)/i);
-            if (prodMatch) {
-              const prodNum = parseInt(prodMatch[1]) - 1;
-              const field = prodMatch[2].toLowerCase();
-              const value = prodMatch[3].trim();
-              
-              if (!productsParsed[prodNum]) {
-                productsParsed[prodNum] = { name: '', type: '', description: '' };
-              }
-              
-              if (field === 'name') productsParsed[prodNum].name = value;
-              else if (field === 'type') productsParsed[prodNum].type = value;
-              else if (field === 'desc') productsParsed[prodNum].description = value;
-            }
-            foundMetrics = true;
-            continue;
-          } else if (currentMultiLineField && trimmedLine && currentSection === 'dutch_tax') {
-            // Continue collecting multi-line value for Dutch Tax fields
-            currentMultiLineValue += ' ' + trimmedLine;
-            continue;
+            if (field === 'title') actionStepsParsed[stepNum].title = value;
+            else if (field === 'priority') actionStepsParsed[stepNum].priority = value;
+            else if (field === 'tag') actionStepsParsed[stepNum].tag = value;
+            else if (field === 'desc') actionStepsParsed[stepNum].description = value;
+          }
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^BOX3_STRATEGY[:\s]/i)) {
+          // Save any pending multi-line field
+          if (currentMultiLineField) {
+            if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
+            else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
           }
           
-          // If we're in a structured section but this line doesn't match any pattern,
-          // save any pending multi-line field and check if we should switch to strategy mode
+          const match = cleanLine.match(/BOX3_STRATEGY:?\s*(.+)/i);
+          currentMultiLineField = 'box3Strategy';
+          currentMultiLineValue = match && match[1] ? match[1].trim() : '';
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^PENSION_RECOMMENDATIONS[:\s]/i)) {
+          // Save any pending multi-line field
+          if (currentMultiLineField) {
+            if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
+            else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
+          }
+          
+          const match = cleanLine.match(/PENSION_RECOMMENDATIONS:?\s*(.+)/i);
+          currentMultiLineField = 'pensionRecommendations';
+          currentMultiLineValue = match && match[1] ? match[1].trim() : '';
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^ESTIMATED_ANNUAL_BOX3_TAX[:\s]/i)) {
+          // Save any pending multi-line field
           if (currentMultiLineField) {
             if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
             else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
@@ -738,19 +748,46 @@ Focus on the most critical insight - either the biggest opportunity they're miss
             currentMultiLineValue = '';
           }
           
-          if (currentSection !== 'strategy' && trimmedLine && 
-              !trimmedLine.match(/^(MONTHLY_NEED|TARGET_NEST_EGG|GAP_TO_FILL|MONTHLY_SAVINGS_TARGET|ALLOCATION_|CURRENT_WEALTH|PROJECTED_AT_RETIREMENT|ACTION_STEP_|BOX3_STRATEGY|PENSION_RECOMMENDATIONS|ESTIMATED_ANNUAL_BOX3_TAX|PRODUCT_)/i)) {
-            currentSection = 'strategy';
+          const match = cleanLine.match(/ESTIMATED_ANNUAL_BOX3_TAX:?\s*[€$]?([\d,\.]+)/i);
+          if (match) dutchTaxParsed.estimatedAnnualTax = parseInt(match[1].replace(/,/g, ''));
+          foundMetrics = true;
+          continue;
+        } else if (cleanLine.match(/^PRODUCT_/i)) {
+          // Save any pending multi-line field
+          if (currentMultiLineField) {
+            if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
+            else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
+            currentMultiLineField = null;
+            currentMultiLineValue = '';
           }
+          
+          const prodMatch = cleanLine.match(/PRODUCT_(\d+)_(NAME|TYPE|DESC):?\s*(.+)/i);
+          if (prodMatch) {
+            const prodNum = parseInt(prodMatch[1]) - 1;
+            const field = prodMatch[2].toLowerCase();
+            const value = prodMatch[3].trim();
+            
+            if (!productsParsed[prodNum]) {
+              productsParsed[prodNum] = { name: '', type: '', description: '' };
+            }
+            
+            if (field === 'name') productsParsed[prodNum].name = value;
+            else if (field === 'type') productsParsed[prodNum].type = value;
+            else if (field === 'desc') productsParsed[prodNum].description = value;
+          }
+          foundMetrics = true;
+          continue;
         }
         
-        // Add to strategy text if we're in the strategy section
-        // Skip lines that look like structured data patterns
-        if (currentSection === 'strategy' && trimmedLine) {
-          // Don't add lines that are structured data patterns
-          if (!trimmedLine.match(/^(MONTHLY_NEED|TARGET_NEST_EGG|GAP_TO_FILL|MONTHLY_SAVINGS_TARGET|ALLOCATION_|CURRENT_WEALTH|PROJECTED_AT_RETIREMENT|ACTION_STEP|BOX3_STRATEGY|PENSION_RECOMMENDATIONS|ESTIMATED_ANNUAL_BOX3_TAX|PRODUCT_)/i)) {
-            strategyLines.push(line);
-          }
+        // Collect multi-line Dutch Tax field values
+        if (currentMultiLineField && trimmedLine) {
+          currentMultiLineValue += ' ' + trimmedLine;
+          continue;
+        }
+        
+        // Everything else goes to strategy text (skip empty lines and section separators)
+        if (trimmedLine) {
+          strategyLines.push(line);
         }
       }
       
@@ -762,18 +799,53 @@ Focus on the most critical insight - either the biggest opportunity they're miss
       
       // Join strategy lines and clean up
       let strategyText = strategyLines.join('\n').trim();
+
+      console.log('PARSED METRICS:', JSON.stringify(metricsParsed));
+      console.log('PARSED ALLOCATION:', JSON.stringify(allocationParsed));
+      console.log('PARSED PROJECTION:', JSON.stringify(projectionParsed));
+      console.log('FOUND METRICS:', foundMetrics);
       
       // Set target nest egg in projection
       projectionParsed.targetNestEgg = metricsParsed.targetNestEgg;
       
       // Calculate current wealth from form data if not provided by AI
       if (projectionParsed.currentWealth === 0) {
-        projectionParsed.currentWealth = formData.savingsAmount + formData.investmentAmount - formData.debtAmount;
+        projectionParsed.currentWealth = formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue - formData.mortgageBalance;
       }
       
       // If no metrics were found, use form data for current wealth as fallback
       if (!foundMetrics) {
-        projectionParsed.currentWealth = formData.savingsAmount + formData.investmentAmount - formData.debtAmount;
+        projectionParsed.currentWealth = formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue - formData.mortgageBalance;
+      }
+      
+      // Fallback allocation based on age if AI didn't provide one
+      if (allocationParsed.stocks === 0 && allocationParsed.bonds === 0 && allocationParsed.realEstate === 0 && allocationParsed.cash === 0) {
+        const age = parseInt(formData.age) || 30;
+        const stockPct = Math.max(20, Math.min(80, 110 - age));
+        const bondPct = Math.round((100 - stockPct) * 0.5);
+        const rePct = Math.round((100 - stockPct) * 0.3);
+        const cashPct = 100 - stockPct - bondPct - rePct;
+        allocationParsed.stocks = stockPct;
+        allocationParsed.bonds = bondPct;
+        allocationParsed.realEstate = rePct;
+        allocationParsed.cash = cashPct;
+        console.log('USING FALLBACK ALLOCATION (age-based):', JSON.stringify(allocationParsed));
+      }
+      
+      // Fallback metrics from form data if AI didn't parse them
+      if (metricsParsed.monthlyNeed === 0 && formData.desiredMonthlyIncome > 0) {
+        metricsParsed.monthlyNeed = parseInt(formData.desiredMonthlyIncome);
+      }
+      if (metricsParsed.targetNestEgg === 0 && formData.desiredMonthlyIncome > 0) {
+        metricsParsed.targetNestEgg = Math.round(formData.desiredMonthlyIncome * 12 / 0.04);
+        projectionParsed.targetNestEgg = metricsParsed.targetNestEgg;
+      }
+      if (metricsParsed.gapToFill === 0 && metricsParsed.targetNestEgg > 0) {
+        metricsParsed.gapToFill = Math.max(0, metricsParsed.targetNestEgg - projectionParsed.currentWealth);
+      }
+      if (metricsParsed.monthlySavingsTarget === 0 && metricsParsed.gapToFill > 0) {
+        const yrsLeft = Math.max(1, (formData.targetRetirementAge || 65) - (parseInt(formData.age) || 30));
+        metricsParsed.monthlySavingsTarget = Math.round(metricsParsed.gapToFill / (yrsLeft * 12));
       }
       
       // Store AI response and show results page
@@ -1392,8 +1464,10 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                     return <div key={index} className="h-2"></div>;
                   }
                   
-                  // Skip any structured data patterns that might have slipped through
-                  if (trimmed.match(/^(MONTHLY_NEED|TARGET_NEST_EGG|GAP_TO_FILL|MONTHLY_SAVINGS_TARGET|ALLOCATION_|CURRENT_WEALTH|PROJECTED_AT_RETIREMENT|ACTION_STEP|BOX3_STRATEGY|PENSION_RECOMMENDATIONS|ESTIMATED_ANNUAL_BOX3_TAX|PRODUCT_)/i)) {
+                  // Skip any structured data patterns that might have slipped through (with or without colon)
+                  // Strip leading bullet markers, bold markers, whitespace before checking
+                  const strippedLine = trimmed.replace(/^[-•*\s]+/, '').replace(/\*\*/g, '');
+                  if (strippedLine.match(/^(MONTHLY_NEED|TARGET_NEST_EGG|GAP_TO_FILL|MONTHLY_SAVINGS_TARGET|ALLOCATION_|CURRENT_WEALTH|PROJECTED_AT_RETIREMENT|ACTION_STEP|BOX3_STRATEGY|PENSION_RECOMMENDATIONS|ESTIMATED_ANNUAL_BOX3_TAX|PRODUCT_|---)/i)) {
                     return null;
                   }
                   
@@ -1401,7 +1475,7 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                   if (trimmed.startsWith('###')) {
                     const heading = trimmed.replace(/^###\s*/, '').replace(/\*\*/g, '').replace(/:/g, '');
                     return (
-                      <h3 key={index} className="text-emerald-400 font-bold text-lg sm:text-xl mt-6 mb-3 first:mt-0">
+                      <h3 key={index} className="text-white font-bold text-lg sm:text-xl mt-6 mb-3 first:mt-0">
                         {heading}
                       </h3>
                     );
@@ -1411,7 +1485,7 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                   if (trimmed.startsWith('##')) {
                     const heading = trimmed.replace(/^##\s*/, '').replace(/\*\*/g, '').replace(/:/g, '');
                     return (
-                      <h2 key={index} className="text-emerald-400 font-bold text-xl sm:text-2xl mt-6 mb-3 first:mt-0">
+                      <h2 key={index} className="text-white font-bold text-xl sm:text-2xl mt-6 mb-3 first:mt-0">
                         {heading}
                       </h2>
                     );
@@ -1421,7 +1495,7 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                   if (trimmed.startsWith('**') && (trimmed.includes(':**') || trimmed.endsWith('**'))) {
                     const heading = trimmed.replace(/\*\*/g, '').replace(/:/g, '');
                     return (
-                      <h3 key={index} className="text-emerald-400 font-bold text-lg sm:text-xl mt-6 mb-3 first:mt-0">
+                      <h3 key={index} className="text-white font-bold text-lg sm:text-xl mt-6 mb-3 first:mt-0">
                         {heading}
                       </h3>
                     );
@@ -1440,7 +1514,7 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                     return (
                       <div key={index} className="flex gap-3 mb-2 ml-4">
                         <span className="text-emerald-400 font-semibold flex-shrink-0">{trimmed.match(/^\d+\./)[0]}</span>
-                        <span className="flex-1">{formattedText}</span>
+                        <span className="flex-1 text-slate-300">{formattedText}</span>
                       </div>
                     );
                   }
@@ -1457,8 +1531,8 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                     });
                     return (
                       <div key={index} className="flex gap-3 mb-2 ml-4">
-                        <span className="text-emerald-400 mt-1">•</span>
-                        <span className="flex-1">{formattedText}</span>
+                        <span className="text-slate-500 mt-1">•</span>
+                        <span className="flex-1 text-slate-300">{formattedText}</span>
                       </div>
                     );
                   }
@@ -1646,7 +1720,7 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                 <div className="mt-6 p-4 bg-slate-50 rounded-lg">
                   <h4 className="text-slate-900 font-semibold text-sm mb-2">Allocation Rationale:</h4>
                   <p className="text-slate-600 text-xs leading-relaxed">
-                    Given your age ({formData.age}) and {formData.retirementAge - formData.age}-year investment horizon, 
+                    Given your age ({formData.age}) and {(formData.targetRetirementAge || 65) - (parseInt(formData.age) || 30)}-year investment horizon, 
                     a {allocation.stocks}% allocation to stocks maximizes compounding growth. 
                     {allocation.bonds > 0 && ` ${allocation.bonds}% in bonds provides stability, while `}
                     {allocation.cash > 0 && ` ${allocation.cash}% cash reserve ensures liquidity for emergencies`}
@@ -1684,6 +1758,92 @@ Focus on the most critical insight - either the biggest opportunity they're miss
               </div>
             </div>
           )}
+
+          {/* Personalized Recommendations */}
+          <div className="mb-8 sm:mb-12">
+            <div className="flex items-center gap-3 mb-6">
+              <svg className="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+              </svg>
+              <h2 className="text-white text-2xl sm:text-3xl font-bold">Recommendations</h2>
+            </div>
+            
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
+              {/* Recommendation 1 — Box 3 Tax Shield */}
+              <div className="bg-white rounded-xl p-6 shadow-lg border-t-4 border-emerald-500">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-10 h-10 bg-emerald-100 rounded-lg flex items-center justify-center">
+                    <svg className="w-5 h-5 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                    </svg>
+                  </div>
+                  <h3 className="text-slate-900 font-bold text-base">Box 3 Tax Shield</h3>
+                </div>
+                <p className="text-slate-600 text-sm leading-relaxed mb-3">
+                  Move savings into Lijfrente (Pillar 3) to reduce Box 3 taxable wealth. 
+                  Combined Jaarruimte + Reserveringsruimte of <span className="font-semibold text-emerald-700">€{(parseInt(formData.jaarruimte || 0) + parseInt(formData.reserveringsruimte || 0)).toLocaleString()}</span> available.
+                </p>
+                <div className="flex items-center gap-2 text-xs text-emerald-600 font-medium">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                  </svg>
+                  37–49.5% immediate tax refund
+                </div>
+              </div>
+
+              {/* Recommendation 2 — Bridge Phase Funding */}
+              <div className="bg-white rounded-xl p-6 shadow-lg border-t-4 border-blue-500">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-10 h-10 bg-blue-100 rounded-lg flex items-center justify-center">
+                    <svg className="w-5 h-5 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                    </svg>
+                  </div>
+                  <h3 className="text-slate-900 font-bold text-base">Bridge Phase Plan</h3>
+                </div>
+                <p className="text-slate-600 text-sm leading-relaxed mb-3">
+                  {(() => {
+                    const bridgeYrs = Math.max(0, Math.round((67.25 - (formData.targetRetirementAge || 65)) * 10) / 10);
+                    const bridgeCost = Math.round(bridgeYrs * 12 * (formData.desiredMonthlyIncome || 3000));
+                    return bridgeYrs > 0 
+                      ? <>Fund <span className="font-semibold text-blue-700">€{bridgeCost.toLocaleString()}</span> for {Math.round(bridgeYrs)} bridge years (age {formData.targetRetirementAge}→67) before AOW kicks in. Use index funds + dividend ETFs for steady drawdown.</>
+                      : <>Your retirement age aligns with AOW. Focus on maximizing pension pot and reducing Box 3 exposure before retirement.</>;
+                  })()}
+                </p>
+                <div className="flex items-center gap-2 text-xs text-blue-600 font-medium">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                  </svg>
+                  Self-funded early retirement buffer
+                </div>
+              </div>
+
+              {/* Recommendation 3 — 2028 Regime Preparation */}
+              <div className="bg-white rounded-xl p-6 shadow-lg border-t-4 border-amber-500">
+                <div className="flex items-center gap-3 mb-4">
+                  <div className="w-10 h-10 bg-amber-100 rounded-lg flex items-center justify-center">
+                    <svg className="w-5 h-5 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                      <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                    </svg>
+                  </div>
+                  <h3 className="text-slate-900 font-bold text-base">2028 Tax Shift</h3>
+                </div>
+                <p className="text-slate-600 text-sm leading-relaxed mb-3">
+                  From 2028, Box 3 switches to actual returns (36% on real gains). 
+                  {parseInt(formData.cryptoValueDec31 || 0) > 0 
+                    ? <> Your crypto portfolio of <span className="font-semibold text-amber-700">€{parseInt(formData.cryptoValueDec31).toLocaleString()}</span> needs restructuring — volatile assets hit harder under real-return taxation.</>
+                    : <> Restructure investments before the regime shift. Use Tegenbewijsregeling if actual returns are below the fictitious 6% rate.</>
+                  }
+                </p>
+                <div className="flex items-center gap-2 text-xs text-amber-600 font-medium">
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                  </svg>
+                  Prepare now to minimize future tax drag
+                </div>
+              </div>
+            </div>
+          </div>
 
           {/* Dutch Tax Optimization */}
           {(dutchTaxOptimization.box3Strategy || dutchTaxOptimization.pensionRecommendations || dutchTaxOptimization.estimatedAnnualTax > 0) && (
@@ -1947,15 +2107,15 @@ Focus on the most critical insight - either the biggest opportunity they're miss
               </button>
 
               <button
-                onClick={() => setCurrentStep('dutchTax')}
+                onClick={() => setCurrentStep('pension')}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
-                  currentStep === 'dutchTax' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                  currentStep === 'pension' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
                 }`}
               >
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
                 </svg>
-                <span className="font-medium">Dutch Tax</span>
+                <span className="font-medium">Pension</span>
               </button>
 
               <button
@@ -1968,6 +2128,18 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
                 </svg>
                 <span className="font-medium">Real Estate</span>
+              </button>
+
+              <button
+                onClick={() => setCurrentStep('retirement')}
+                className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
+                  currentStep === 'retirement' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
+                }`}
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
+                </svg>
+                <span className="font-medium">Retirement</span>
               </button>
             </nav>
           </div>
@@ -1986,8 +2158,9 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                 <div className="flex gap-1">
                   <div className={`w-2 h-2 rounded-full ${currentStep === 'household' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
                   <div className={`w-2 h-2 rounded-full ${currentStep === 'financials' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
-                  <div className={`w-2 h-2 rounded-full ${currentStep === 'dutchTax' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
+                  <div className={`w-2 h-2 rounded-full ${currentStep === 'pension' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
                   <div className={`w-2 h-2 rounded-full ${currentStep === 'realEstate' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
+                  <div className={`w-2 h-2 rounded-full ${currentStep === 'retirement' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
                 </div>
               </div>
               {/* Household Step */}
@@ -2133,7 +2306,7 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                       </h3>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Annual Gross Salary (Box 1)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{formData.hasSpouse ? 'Your Annual Gross Salary (Box 1)' : 'Annual Gross Salary (Box 1)'}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -2147,6 +2320,21 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                             <p className="text-red-500 text-sm mt-1">{validationErrors.grossSalary}</p>
                           )}
                         </div>
+
+                        {formData.hasSpouse && (
+                          <div>
+                            <label className="block text-white font-medium mb-2 text-sm">Spouse Annual Gross Salary (Box 1)</label>
+                            <div className="relative">
+                              <span className="absolute left-4 top-3 text-slate-400">€</span>
+                              <input
+                                type="number"
+                                value={formData.spouseGrossSalary}
+                                onChange={(e) => updateFormData('spouseGrossSalary', Number(e.target.value))}
+                                className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                              />
+                            </div>
+                          </div>
+                        )}
 
                         <div className="flex items-center justify-between">
                           <div>
@@ -2293,46 +2481,466 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                 </div>
               )}
 
-              {/* Dutch Tax Step */}
-              {currentStep === 'dutchTax' && (
+              {/* Pension Step */}
+              {currentStep === 'pension' && (
                 <div>
-                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Dutch Tax Parameters</h1>
-                  <p className="text-slate-400 mb-8 sm:mb-12">Help us optimize your tax situation.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Pension Details</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">Help us optimize your pension and retirement plan.</p>
 
-                  <div className="space-y-6">
+                  <div className="space-y-8">
+                    {/* Pillar 1 - State Pension */}
                     <div>
-                      <label className="block text-white font-medium mb-2">Jaarruimte (Pillar 3 Pension Room)</label>
-                      <div className="relative">
-                        <span className="absolute left-4 top-3 text-slate-400">€</span>
-                        <input
-                          type="number"
-                          value={formData.jaarruimte}
-                          onChange={(e) => updateFormData('jaarruimte', Number(e.target.value))}
-                          className={`w-full bg-slate-800 border ${validationErrors.jaarruimte ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                        />
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">🏥</span> Pillar 1 — State Pension (The Safety Net)
+                        <div className="relative group ml-1">
+                          <svg className="w-4 h-4 text-slate-400 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                          </svg>
+                          <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-80 bg-slate-700 text-white text-xs rounded-lg p-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                            <p>In 2026, you accrue <strong className="text-emerald-400">2%</strong> of the AOW for every year you are insured in NL. 50 years are needed for a 100% payout (<strong className="text-emerald-400">€1,637.57 gross/mo</strong> for singles).</p>
+                            <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700"></div>
+                          </div>
+                        </div>
+                      </h3>
+                      <p className="text-slate-400 text-sm mb-4">This determines your basic "floor" income provided by the government.</p>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">{formData.hasSpouse ? 'Your Arrival Age in the Netherlands' : 'Arrival Age in the Netherlands'}</label>
+                          <input
+                            type="number"
+                            value={formData.arrivalAgeNL}
+                            onChange={(e) => updateFormData('arrivalAgeNL', Number(e.target.value))}
+                            placeholder="e.g. 0 if born here, 25 if moved at 25"
+                            className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          />
+                          <p className="text-slate-400 text-xs mt-1">At what age did you first start living/working in the Netherlands?</p>
+                        </div>
+
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Years Spent Abroad (Post-Arrival)</label>
+                          <input
+                            type="number"
+                            value={formData.yearsAbroad}
+                            onChange={(e) => updateFormData('yearsAbroad', Number(e.target.value))}
+                            placeholder="0"
+                            className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          />
+                          <p className="text-slate-400 text-xs mt-1">Any years you lived outside NL after arrival (stops the 2% annual accrual)</p>
+                        </div>
+
+                        {/* AOW Preview */}
+                        {(() => {
+                          const yearsInNL = Math.max(0, Math.min(67, 67 - formData.arrivalAgeNL) - formData.yearsAbroad);
+                          const accrualPct = Math.min(100, yearsInNL * 2);
+                          return (
+                            <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4">
+                              <p className="text-emerald-400 text-sm font-medium">
+                                📊 Based on your arrival at age {formData.arrivalAgeNL}{formData.yearsAbroad > 0 ? ` and ${formData.yearsAbroad} year(s) abroad` : ''}, you will accrue <strong className="text-white">{accrualPct}%</strong> of the full state pension by age 67.
+                              </p>
+                              <p className="text-slate-400 text-xs mt-2">
+                                Estimated gross AOW: <strong className="text-white">€{Math.round(1637.57 * accrualPct / 100).toLocaleString()}/mo</strong> (based on €1,637.57 full single rate)
+                              </p>
+                            </div>
+                          );
+                        })()}
                       </div>
-                      <p className="text-slate-400 text-sm mt-2">Amount you can contribute to private pension for tax deduction</p>
-                      {validationErrors.jaarruimte && (
-                        <p className="text-red-500 text-sm mt-1">{validationErrors.jaarruimte}</p>
-                      )}
                     </div>
 
-                    <div>
-                      <label className="block text-white font-medium mb-2">Factor A (Employer Pension)</label>
-                      <div className="relative">
-                        <span className="absolute left-4 top-3 text-slate-400">€</span>
-                        <input
-                          type="number"
-                          value={formData.factorA}
-                          onChange={(e) => updateFormData('factorA', Number(e.target.value))}
-                          className={`w-full bg-slate-800 border ${validationErrors.factorA ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
-                        />
+                    {/* Spouse Pillar 1 */}
+                    {formData.hasSpouse && (
+                      <div>
+                        <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                          <span className="text-lg">👥</span> Spouse — State Pension
+                        </h3>
+                        <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                          <div>
+                            <label className="block text-white font-medium mb-2 text-sm">Spouse Arrival Age in the Netherlands</label>
+                            <input
+                              type="number"
+                              value={formData.spouseArrivalAgeNL}
+                              onChange={(e) => updateFormData('spouseArrivalAgeNL', Number(e.target.value))}
+                              placeholder="e.g. 0 if born here, 25 if moved at 25"
+                              className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                            <p className="text-slate-400 text-xs mt-1">At what age did your spouse first start living/working in the Netherlands?</p>
+                          </div>
+
+                          <div>
+                            <label className="block text-white font-medium mb-2 text-sm">Spouse Years Spent Abroad (Post-Arrival)</label>
+                            <input
+                              type="number"
+                              value={formData.spouseYearsAbroad}
+                              onChange={(e) => updateFormData('spouseYearsAbroad', Number(e.target.value))}
+                              placeholder="0"
+                              className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                            <p className="text-slate-400 text-xs mt-1">Any years spouse lived outside NL after arrival</p>
+                          </div>
+
+                          {/* Spouse AOW Preview */}
+                          {(() => {
+                            const yearsInNL = Math.max(0, Math.min(67, 67 - formData.spouseArrivalAgeNL) - formData.spouseYearsAbroad);
+                            const accrualPct = Math.min(100, yearsInNL * 2);
+                            return (
+                              <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4">
+                                <p className="text-emerald-400 text-sm font-medium">
+                                  📊 Based on spouse's arrival at age {formData.spouseArrivalAgeNL}{formData.spouseYearsAbroad > 0 ? ` and ${formData.spouseYearsAbroad} year(s) abroad` : ''}, they will accrue <strong className="text-white">{accrualPct}%</strong> of the full state pension by age 67.
+                                </p>
+                                <p className="text-slate-400 text-xs mt-2">
+                                  Estimated gross AOW: <strong className="text-white">€{Math.round(1637.57 * accrualPct / 100).toLocaleString()}/mo</strong> (based on €1,637.57 full single rate)
+                                </p>
+                              </div>
+                            );
+                          })()}
+                        </div>
                       </div>
-                      <p className="text-slate-400 text-sm mt-2">Annual pension accrual from employer (if applicable)</p>
-                      {validationErrors.factorA && (
-                        <p className="text-red-500 text-sm mt-1">{validationErrors.factorA}</p>
-                      )}
+                    )}
+
+                    {/* Pillar 2 - Workplace Pension */}
+                    <div>
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">🏢</span> Pillar 2 — Workplace Pension (The Employer Pot)
+                      </h3>
+                      <p className="text-slate-400 text-sm mb-4">This captures the money built up through your current and past jobs.</p>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">{formData.hasSpouse ? 'Your Total Built-up Pension' : 'Total Built-up Pension'}</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.builtUpPension}
+                              onChange={(e) => updateFormData('builtUpPension', Number(e.target.value))}
+                              placeholder="e.g. 150000"
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                          <p className="text-slate-400 text-xs mt-1">Total value accrued across all employer pensions</p>
+                        </div>
+
+                        <div>
+                          <div className="flex items-center gap-2 mb-2">
+                            <label className="block text-white font-medium text-sm">Factor A (from your UPO)</label>
+                            <div className="relative group">
+                              <svg className="w-4 h-4 text-slate-400 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 bg-slate-700 text-white text-xs rounded-lg p-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                                <p className="font-semibold text-emerald-400 mb-1">📍 Where is my Factor A?</p>
+                                <p>Check your most recent Uniform Pension Overview (UPO) from your employer's pension fund. It is typically found on the last page. If you have no employer pension, enter 0.</p>
+                                <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700"></div>
+                              </div>
+                            </div>
+                          </div>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.factorA}
+                              onChange={(e) => {
+                                const val = Number(e.target.value);
+                                updateFormData('factorA', val);
+                                const cappedSalary = Math.min(formData.grossSalary, 137800);
+                                const calc = Math.max(0, Math.round(0.30 * (cappedSalary - 19172) - 6.27 * val));
+                                updateFormData('jaarruimte', calc);
+                              }}
+                              className={`w-full bg-slate-800 border ${validationErrors.factorA ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                            />
+                          </div>
+                          <p className="text-slate-400 text-xs mt-1">Annual pension accrual from employer</p>
+                          {validationErrors.factorA && (
+                            <p className="text-red-500 text-sm mt-1">{validationErrors.factorA}</p>
+                          )}
+                        </div>
+
+                        {/* Info Link */}
+                        <div className="flex items-center gap-2 bg-blue-500/10 border border-blue-500/30 rounded-lg p-3">
+                          <svg className="w-5 h-5 text-blue-400 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
+                          </svg>
+                          <p className="text-blue-300 text-xs">
+                            Find this at <a href="https://www.mijnpensioenoverzicht.nl" target="_blank" rel="noopener noreferrer" className="text-blue-400 underline font-semibold hover:text-blue-300">mijnpensioenoverzicht.nl</a> or on your last Uniform Pension Overview (UPO), last page.
+                          </p>
+                        </div>
+
+                        {/* Visual Status - Coverage Progress */}
+                        {(() => {
+                          const desiredMonthly = Math.round(formData.grossSalary * 0.7 / 12);
+                          const pensionMonthly = formData.builtUpPension > 0 ? Math.round(formData.builtUpPension / (12 * (85 - formData.retirementAge))) : 0;
+                          const coveragePct = desiredMonthly > 0 ? Math.min(100, Math.round((pensionMonthly / desiredMonthly) * 100)) : 0;
+                          return (
+                            <div className="bg-slate-800/50 rounded-lg p-4">
+                              <div className="flex items-center justify-between mb-2">
+                                <p className="text-slate-300 text-sm font-medium">Retirement lifestyle coverage</p>
+                                <span className={`text-sm font-bold ${coveragePct >= 70 ? 'text-emerald-400' : coveragePct >= 40 ? 'text-yellow-400' : 'text-red-400'}`}>{coveragePct}%</span>
+                              </div>
+                              <div className="w-full bg-slate-700 rounded-full h-3">
+                                <div
+                                  className={`h-3 rounded-full transition-all ${coveragePct >= 70 ? 'bg-emerald-500' : coveragePct >= 40 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                                  style={{ width: `${coveragePct}%` }}
+                                ></div>
+                              </div>
+                              <p className="text-slate-400 text-xs mt-2">
+                                Your workplace pension currently covers <strong className="text-white">{coveragePct}%</strong> of your desired retirement lifestyle (~€{desiredMonthly.toLocaleString()}/mo based on 70% of gross salary)
+                              </p>
+                            </div>
+                          );
+                        })()}
+                      </div>
                     </div>
+
+                    {/* Spouse Pillar 2 */}
+                    {formData.hasSpouse && (
+                      <div>
+                        <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                          <span className="text-lg">👥</span> Spouse — Workplace Pension
+                        </h3>
+                        <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                          <div>
+                            <label className="block text-white font-medium mb-2 text-sm">Spouse Total Built-up Pension</label>
+                            <div className="relative">
+                              <span className="absolute left-4 top-3 text-slate-400">€</span>
+                              <input
+                                type="number"
+                                value={formData.spouseBuiltUpPension}
+                                onChange={(e) => updateFormData('spouseBuiltUpPension', Number(e.target.value))}
+                                placeholder="e.g. 80000"
+                                className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                              />
+                            </div>
+                            <p className="text-slate-400 text-xs mt-1">Total value accrued across spouse's employer pensions</p>
+                          </div>
+
+                          <div>
+                            <div className="flex items-center gap-2 mb-2">
+                              <label className="block text-white font-medium text-sm">Spouse Factor A (from UPO)</label>
+                              <div className="relative group">
+                                <svg className="w-4 h-4 text-slate-400 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                </svg>
+                                <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 bg-slate-700 text-white text-xs rounded-lg p-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                                  <p className="font-semibold text-emerald-400 mb-1">📍 Where is my Factor A?</p>
+                                  <p>Check your most recent Uniform Pension Overview (UPO) from your employer's pension fund. It is typically found on the last page. If you have no employer pension, enter 0.</p>
+                                  <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700"></div>
+                                </div>
+                              </div>
+                            </div>
+                            <div className="relative">
+                              <span className="absolute left-4 top-3 text-slate-400">€</span>
+                              <input
+                                type="number"
+                                value={formData.spouseFactorA}
+                                onChange={(e) => {
+                                  const val = Number(e.target.value);
+                                  updateFormData('spouseFactorA', val);
+                                  const cappedSpouseSalary = Math.min(formData.spouseGrossSalary, 137800);
+                                  const calc = Math.max(0, Math.round(0.30 * (cappedSpouseSalary - 19172) - 6.27 * val));
+                                  updateFormData('spouseJaarruimte', calc);
+                                }}
+                                className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                              />
+                            </div>
+                            <p className="text-slate-400 text-xs mt-1">Annual pension accrual from spouse's employer</p>
+                          </div>
+
+                          {/* Spouse Coverage Progress */}
+                          {(() => {
+                            const desiredMonthly = Math.round(formData.spouseGrossSalary * 0.7 / 12);
+                            const pensionMonthly = formData.spouseBuiltUpPension > 0 ? Math.round(formData.spouseBuiltUpPension / (12 * (85 - formData.retirementAge))) : 0;
+                            const coveragePct = desiredMonthly > 0 ? Math.min(100, Math.round((pensionMonthly / desiredMonthly) * 100)) : 0;
+                            return (
+                              <div className="bg-slate-800/50 rounded-lg p-4">
+                                <div className="flex items-center justify-between mb-2">
+                                  <p className="text-slate-300 text-sm font-medium">Spouse retirement coverage</p>
+                                  <span className={`text-sm font-bold ${coveragePct >= 70 ? 'text-emerald-400' : coveragePct >= 40 ? 'text-yellow-400' : 'text-red-400'}`}>{coveragePct}%</span>
+                                </div>
+                                <div className="w-full bg-slate-700 rounded-full h-3">
+                                  <div
+                                    className={`h-3 rounded-full transition-all ${coveragePct >= 70 ? 'bg-emerald-500' : coveragePct >= 40 ? 'bg-yellow-500' : 'bg-red-500'}`}
+                                    style={{ width: `${coveragePct}%` }}
+                                  ></div>
+                                </div>
+                                <p className="text-slate-400 text-xs mt-2">
+                                  Spouse workplace pension covers <strong className="text-white">{coveragePct}%</strong> of desired retirement (~€{desiredMonthly.toLocaleString()}/mo)
+                                </p>
+                              </div>
+                            );
+                          })()}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Pillar 3 - Private Savings (The Tax Shield) */}
+                    <div>
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">🛡️</span> {formData.hasSpouse ? 'Your Pillar 3 — Private Savings (The Tax Shield)' : 'Pillar 3 — Private Savings (The Tax Shield)'}
+                      </h3>
+                      <p className="text-slate-400 text-sm mb-4">See how you can "beat the system" using tax-deductible accounts.</p>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Jaarruimte (Tax-Deductible Pension Room)</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.jaarruimte}
+                              readOnly
+                              className="w-full bg-slate-800/50 border border-slate-700 text-emerald-400 font-semibold pl-8 pr-4 py-3 rounded-lg cursor-not-allowed"
+                            />
+                          </div>
+                          <p className="text-slate-400 text-xs mt-1">
+                            Auto-calculated: 30% × (€{Math.min(formData.grossSalary, 137800).toLocaleString()} - €19,172) - (6.27 × €{formData.factorA.toLocaleString()})
+                          </p>
+                          {validationErrors.jaarruimte && (
+                            <p className="text-red-500 text-sm mt-1">{validationErrors.jaarruimte}</p>
+                          )}
+                        </div>
+
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Unused Reserveringsruimte (Catch-up Room)</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.reserveringsruimte}
+                              onChange={(e) => updateFormData('reserveringsruimte', Number(e.target.value))}
+                              placeholder="0"
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                          <p className="text-slate-400 text-xs mt-1">Unused tax-deductible pension room from the previous 10 years (max €42,753 in 2026)</p>
+                        </div>
+
+                        {/* Tax Refund Alert */}
+                        {(formData.jaarruimte > 0 || formData.reserveringsruimte > 0) && (
+                          <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
+                            <div className="flex items-start gap-3">
+                              <span className="text-amber-400 text-lg">⚡</span>
+                              <div>
+                                <p className="text-amber-400 text-sm font-semibold mb-1">Immediate Tax Refund Opportunity</p>
+                                <p className="text-slate-300 text-xs leading-relaxed">
+                                  Using this room today could trigger an immediate tax refund of up to <strong className="text-white">49.5%</strong>. On €{(formData.jaarruimte + formData.reserveringsruimte).toLocaleString()} total room, that’s up to <strong className="text-white">€{Math.round((formData.jaarruimte + formData.reserveringsruimte) * 0.495).toLocaleString()}</strong> back.
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+
+                        {/* Box 3 Shielding */}
+                        <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4">
+                          <div className="flex items-start gap-3">
+                            <span className="text-emerald-400 text-lg">🛡️</span>
+                            <div>
+                              <p className="text-emerald-400 text-sm font-semibold mb-1">Box 3 Shielding</p>
+                              <p className="text-slate-300 text-xs leading-relaxed">
+                                Assets in Pillar 3 accounts are <strong className="text-white">100% exempt</strong> from the 2026 Box 3 wealth tax. Every euro you move here is shielded from the 7.78% fictitious return tax.
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Spouse Pillar 3 */}
+                    {formData.hasSpouse && (
+                      <div>
+                        <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                          <span className="text-lg">👥</span> Spouse Pillar 3 — Private Savings (The Tax Shield)
+                        </h3>
+                        <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                          <div>
+                            <label className="block text-white font-medium mb-2 text-sm">Spouse Jaarruimte (Tax-Deductible Pension Room)</label>
+                            <div className="relative">
+                              <span className="absolute left-4 top-3 text-slate-400">€</span>
+                              <input
+                                type="number"
+                                value={formData.spouseJaarruimte}
+                                readOnly
+                                className="w-full bg-slate-800/50 border border-slate-700 text-emerald-400 font-semibold pl-8 pr-4 py-3 rounded-lg cursor-not-allowed"
+                              />
+                            </div>
+                            <p className="text-slate-400 text-xs mt-1">
+                              Auto-calculated: 30% × (€{Math.min(formData.spouseGrossSalary, 137800).toLocaleString()} - €19,172) - (6.27 × €{formData.spouseFactorA.toLocaleString()})
+                            </p>
+                          </div>
+
+                          <div>
+                            <label className="block text-white font-medium mb-2 text-sm">Spouse Unused Reserveringsruimte</label>
+                            <div className="relative">
+                              <span className="absolute left-4 top-3 text-slate-400">€</span>
+                              <input
+                                type="number"
+                                value={formData.spouseReserveringsruimte}
+                                onChange={(e) => updateFormData('spouseReserveringsruimte', Number(e.target.value))}
+                                placeholder="0"
+                                className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                              />
+                            </div>
+                            <p className="text-slate-400 text-xs mt-1">Spouse's unused catch-up room from the previous 10 years</p>
+                          </div>
+
+                          {(formData.spouseJaarruimte > 0 || formData.spouseReserveringsruimte > 0) && (
+                            <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4">
+                              <div className="flex items-start gap-3">
+                                <span className="text-amber-400 text-lg">⚡</span>
+                                <div>
+                                  <p className="text-amber-400 text-sm font-semibold mb-1">Spouse Tax Refund Opportunity</p>
+                                  <p className="text-slate-300 text-xs leading-relaxed">
+                                    Using this room could trigger a refund of up to <strong className="text-white">€{Math.round((formData.spouseJaarruimte + formData.spouseReserveringsruimte) * 0.495).toLocaleString()}</strong>.
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Pension Gap Summary */}
+                    {(() => {
+                      const desiredMonthly = Math.round(formData.grossSalary * 0.7 / 12);
+                      const yearsInNL = Math.max(0, Math.min(67, 67 - formData.arrivalAgeNL) - formData.yearsAbroad);
+                      const aowPct = Math.min(100, yearsInNL * 2);
+                      const aowMonthly = Math.round(1637.57 * aowPct / 100);
+                      const pillar2Monthly = formData.builtUpPension > 0 ? Math.round(formData.builtUpPension / (12 * Math.max(1, 85 - formData.retirementAge))) : 0;
+                      const totalCovered = aowMonthly + pillar2Monthly;
+                      const gap = Math.max(0, desiredMonthly - totalCovered);
+                      return gap > 0 ? (
+                        <div className="bg-gradient-to-r from-red-500/10 to-orange-500/10 border-2 border-red-500/40 rounded-xl p-5">
+                          <div className="flex items-start gap-3">
+                            <div className="flex-shrink-0 w-12 h-12 bg-red-500/20 rounded-full flex items-center justify-center">
+                              <svg className="w-6 h-6 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L3.34 16.5c-.77.833.192 2.5 1.732 2.5z" />
+                              </svg>
+                            </div>
+                            <div className="flex-1">
+                              <h4 className="text-red-400 font-bold text-lg mb-1">
+                                Current Pension Gap: €{gap.toLocaleString()} per month
+                              </h4>
+                              <p className="text-slate-300 text-sm leading-relaxed">
+                                Your Pillars 1 and 2 currently fall short of your <strong className="text-white">€{desiredMonthly.toLocaleString()}/mo</strong> lifestyle (AOW: €{aowMonthly.toLocaleString()} + Workplace: €{pillar2Monthly.toLocaleString()} = €{totalCovered.toLocaleString()}/mo). The <strong className="text-emerald-400">AI Strategy PDF</strong> will show you exactly how to fill this gap using Pillar 3 and Real Estate.
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="bg-emerald-500/10 border-2 border-emerald-500/30 rounded-xl p-5">
+                          <div className="flex items-start gap-3">
+                            <div className="flex-shrink-0 w-12 h-12 bg-emerald-500/20 rounded-full flex items-center justify-center">
+                              <svg className="w-6 h-6 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                            </div>
+                            <div className="flex-1">
+                              <h4 className="text-emerald-400 font-bold text-lg mb-1">No Pension Gap — Well Done!</h4>
+                              <p className="text-slate-300 text-sm leading-relaxed">
+                                Your Pillars 1 and 2 cover your <strong className="text-white">€{desiredMonthly.toLocaleString()}/mo</strong> target. The AI Strategy PDF can still optimize your tax position and grow your wealth further.
+                              </p>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })()}
                   </div>
 
                   <div className="flex items-center justify-between mt-8 sm:mt-12">
@@ -2361,18 +2969,29 @@ Focus on the most critical insight - either the biggest opportunity they're miss
               {/* Real Estate Step */}
               {currentStep === 'realEstate' && (
                 <div>
-                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Real Estate & Property Details</h1>
-                  <p className="text-slate-400 mb-8 sm:mb-12">Tell us about your residential and investment property.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Property & Mortgage</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">Identify hidden wealth and tax-saving opportunities in your real estate.</p>
 
                   <div className="space-y-8">
-                    {/* Primary Residence */}
+                    {/* Current Primary Residence (Box 1) */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">🏠</span> Primary Residence
+                        <span className="text-lg">🏠</span> Current Primary Residence (Box 1)
                       </h3>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Property Value (WOZ-waarde)</label>
+                          <div className="flex items-center gap-2 mb-2">
+                            <label className="block text-white font-medium text-sm">Current Market / WOZ Value</label>
+                            <div className="relative group">
+                              <svg className="w-4 h-4 text-slate-400 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 bg-slate-700 text-white text-xs rounded-lg p-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                                <p>Check <a href="https://www.wozwaardeloket.nl" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline">wozwaardeloket.nl</a> for the most recent official valuation.</p>
+                                <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700"></div>
+                              </div>
+                            </div>
+                          </div>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -2383,6 +3002,7 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                             />
                           </div>
                         </div>
+
                         <div>
                           <label className="block text-white font-medium mb-2 text-sm">Mortgage Balance</label>
                           <div className="relative">
@@ -2391,6 +3011,7 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                               type="number"
                               value={formData.mortgageBalance}
                               onChange={(e) => updateFormData('mortgageBalance', Number(e.target.value))}
+                              placeholder="Remaining principal on your loan"
                               className={`w-full bg-slate-800 border ${validationErrors.mortgageBalance ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                             />
                           </div>
@@ -2398,33 +3019,82 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                             <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageBalance}</p>
                           )}
                         </div>
+
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Mortgage Interest Rate (%)</label>
+                          <div className="flex items-center gap-2 mb-2">
+                            <label className="block text-white font-medium text-sm">Interest Rate (%)</label>
+                            <div className="relative group">
+                              <svg className="w-4 h-4 text-slate-400 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                              </svg>
+                              <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 bg-slate-700 text-white text-xs rounded-lg p-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
+                                <p>Log in to your bank portal (e.g., ING, Rabo) under "Hypotheek" details. Check if it's Annuity, Linear, or Interest-only on your annual bank statement.</p>
+                                <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700"></div>
+                              </div>
+                            </div>
+                          </div>
                           <div className="relative">
                             <input
                               type="number"
                               step="0.1"
                               value={formData.mortgageInterestRate}
                               onChange={(e) => updateFormData('mortgageInterestRate', Number(e.target.value))}
+                              placeholder="e.g. 4.2"
                               className={`w-full bg-slate-800 border ${validationErrors.mortgageInterestRate ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                             />
                             <span className="absolute right-4 top-3 text-slate-400">%</span>
                           </div>
+                          <p className="text-slate-400 text-xs mt-1">Crucial for comparing debt costs vs. investment returns</p>
                           {validationErrors.mortgageInterestRate && (
                             <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageInterestRate}</p>
                           )}
                         </div>
+
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Remaining Mortgage Term (Years)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">Remaining Term (Years)</label>
                           <input
                             type="number"
                             value={formData.mortgageYearsLeft}
                             onChange={(e) => updateFormData('mortgageYearsLeft', Number(e.target.value))}
+                            placeholder="When will the monthly burn rate drop to zero?"
                             className={`w-full bg-slate-800 border ${validationErrors.mortgageYearsLeft ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                           />
                           {validationErrors.mortgageYearsLeft && (
                             <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageYearsLeft}</p>
                           )}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* The "Upgrade" Scenario */}
+                    <div>
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">🎯</span> The "Upgrade" Scenario (Strategy Hook)
+                      </h3>
+                      <p className="text-slate-400 text-sm mb-4">Planning a property upgrade? Tell us your dream home.</p>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Target Property Value</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.targetPropertyValue}
+                              onChange={(e) => updateFormData('targetPropertyValue', Number(e.target.value))}
+                              placeholder="Value of your dream/upgraded home"
+                              className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Planned Move Date</label>
+                          <input
+                            type="date"
+                            value={formData.plannedMoveDate}
+                            onChange={(e) => updateFormData('plannedMoveDate', e.target.value)}
+                            className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          />
+                          <p className="text-slate-400 text-xs mt-1">When do you intend to switch properties?</p>
                         </div>
                       </div>
                     </div>
@@ -2471,7 +3141,6 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                             />
                           </div>
-                          <p className="text-slate-400 text-xs mt-2">Original cost basis for calculating capital gain</p>
                         </div>
                       </div>
                     </div>
@@ -2493,12 +3162,102 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                             />
                           </div>
-                          <p className="text-slate-400 text-xs mt-2">Loss from 2024 or earlier years that can be deducted</p>
+                          <p className="text-slate-400 text-xs mt-2">Loss from 2024 or earlier that can be deducted</p>
                         </div>
                       </div>
                     </div>
 
-                    {/* Legacy Fields - only show if using old values */}
+                    {/* Calculations & Tax Analysis */}
+                    {formData.propertyValue > 0 && formData.mortgageBalance > 0 && (
+                      <div>
+                        <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                          <span className="text-lg">📈</span> Your Tax Analysis
+                        </h3>
+                        {(() => {
+                          const equity = formData.propertyValue - formData.mortgageBalance;
+                          const annualInterest = formData.mortgageBalance * (formData.mortgageInterestRate / 100);
+                          const hraDeduction = 0.3748;
+                          const hraRefund = Math.round(annualInterest * hraDeduction);
+                          const effectiveRate = formData.mortgageInterestRate * (1 - hraDeduction);
+                          const eigenwoningforfait = formData.propertyValue <= 1310000 ? Math.round(formData.propertyValue * 0.0035) : Math.round(formData.propertyValue * 0.0235);
+                          const netTaxBenefit = hraRefund - Math.round(eigenwoningforfait * 0.3748);
+                          const box3TaxOnEquity = Math.round(Math.max(0, equity - 57000) * 0.0778 * 0.36);
+                          const totalNonHousingAssets = formData.savingsBalance + formData.cryptoValueDec31;
+                          const box3TaxSavings = Math.round(Math.min(totalNonHousingAssets, equity) * 0.0778 * 0.36);
+
+                          return (
+                            <div className="space-y-4">
+                              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                                <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                                  <p className="text-slate-400 text-xs mb-1">Box 3 Tax Savings</p>
+                                  <p className="text-emerald-400 text-xl font-bold">€{box3TaxSavings.toLocaleString()}/yr</p>
+                                  <p className="text-slate-500 text-xs mt-1">By moving cash to home equity</p>
+                                </div>
+                                <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                                  <p className="text-slate-400 text-xs mb-1">HRA Tax Refund</p>
+                                  <p className="text-emerald-400 text-xl font-bold">€{hraRefund.toLocaleString()}/yr</p>
+                                  <p className="text-slate-500 text-xs mt-1">Effective rate: {effectiveRate.toFixed(2)}%</p>
+                                </div>
+                                <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                                  <p className="text-slate-400 text-xs mb-1">Net Tax Benefit</p>
+                                  <p className={`text-xl font-bold ${netTaxBenefit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>€{netTaxBenefit.toLocaleString()}/yr</p>
+                                  <p className="text-slate-500 text-xs mt-1">HRA refund minus eigenwoningforfait</p>
+                                </div>
+                              </div>
+
+                              {/* Eigenwoningforfait breakdown */}
+                              <div className="bg-slate-800/30 rounded-lg p-3 border border-slate-700">
+                                <p className="text-slate-400 text-xs">
+                                  <strong className="text-slate-300">Eigenwoningforfait:</strong> €{eigenwoningforfait.toLocaleString()}/yr (imputed rent, {formData.propertyValue <= 1310000 ? '0.35%' : '2.35%'} of WOZ) • <strong className="text-slate-300">Net:</strong> HRA €{hraRefund.toLocaleString()} - EWF tax €{Math.round(eigenwoningforfait * 0.3748).toLocaleString()} = <strong className={netTaxBenefit >= 0 ? 'text-emerald-400' : 'text-red-400'}>€{netTaxBenefit.toLocaleString()}</strong>
+                                </p>
+                              </div>
+                            </div>
+                          );
+                        })()}
+                      </div>
+                    )}
+
+                    {/* Teaser Alerts */}
+                    {formData.propertyValue > 0 && (
+                      <div className="space-y-4">
+                        {/* House as a Shield Alert */}
+                        {(() => {
+                          const equity = formData.propertyValue - formData.mortgageBalance;
+                          const totalBox3Assets = formData.savingsBalance + formData.cryptoValueDec31;
+                          const exposedWealth = Math.max(0, totalBox3Assets - 57000);
+                          return exposedWealth > 0 ? (
+                            <div className="bg-gradient-to-r from-amber-500/10 to-orange-500/10 border border-amber-500/40 rounded-xl p-5">
+                              <div className="flex items-start gap-3">
+                                <span className="text-2xl">🛡️</span>
+                                <div>
+                                  <h4 className="text-amber-400 font-bold mb-1">The "House as a Shield" Alert</h4>
+                                  <p className="text-slate-300 text-sm leading-relaxed">
+                                    Your current setup leaves <strong className="text-white">€{exposedWealth.toLocaleString()}</strong> in assets exposed to the 2028 Box 3 'Actual Return' tax. Moving this to a primary residence could <strong className="text-emerald-400">shield this wealth entirely</strong>.
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+                          ) : null;
+                        })()}
+
+                        {/* Buy vs Invest Verdict */}
+                        {formData.mortgageInterestRate > 0 && (
+                          <div className="bg-gradient-to-r from-blue-500/10 to-indigo-500/10 border border-blue-500/40 rounded-xl p-5">
+                            <div className="flex items-start gap-3">
+                              <span className="text-2xl">⚖️</span>
+                              <div>
+                                <h4 className="text-blue-400 font-bold mb-1">The "Buy vs. Invest" Verdict</h4>
+                                <p className="text-slate-300 text-sm leading-relaxed">
+                                  Should you pay off your <strong className="text-white">{formData.mortgageInterestRate}%</strong> mortgage or keep the money in the AEX? Our AI found a <strong className="text-white">€{Math.round(formData.mortgageBalance * Math.abs(0.08 - formData.mortgageInterestRate / 100) * 10).toLocaleString()}</strong> difference in your 10-year outlook. <strong className="text-emerald-400">Get the full verdict in your PDF</strong>.
+                                </p>
+                              </div>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Legacy note */}
                     {formData.homeValue > 0 && (
                       <div className="bg-yellow-900/20 border border-yellow-700/50 rounded-lg p-4">
                         <p className="text-yellow-300 text-xs">
@@ -2506,6 +3265,283 @@ Focus on the most critical insight - either the biggest opportunity they're miss
                         </p>
                       </div>
                     )}
+                  </div>
+
+                  <div className="flex items-center justify-between mt-8 sm:mt-12">
+                    <button
+                      onClick={handleBack}
+                      className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors text-sm sm:text-base"
+                    >
+                      <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+                      </svg>
+                      Back
+                    </button>
+                    <button
+                      onClick={handleContinue}
+                      className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 sm:px-6 py-2 sm:py-3 rounded-lg font-semibold transition-all text-sm sm:text-base"
+                    >
+                      Continue
+                      <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
+                      </svg>
+                    </button>
+                  </div>
+                </div>
+              )}
+
+              {/* Retirement Step */}
+              {currentStep === 'retirement' && (
+                <div>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Retirement — The Finish Line</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">Define your freedom date and uncover the hidden risks of early retirement in the Netherlands.</p>
+
+                  <div className="space-y-8">
+                    {/* Core Retirement Inputs */}
+                    <div>
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">🎯</span> Your Retirement Target
+                      </h3>
+                      <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Target Retirement Age</label>
+                          <input
+                            type="number"
+                            value={formData.targetRetirementAge}
+                            onChange={(e) => updateFormData('targetRetirementAge', Number(e.target.value))}
+                            min="30"
+                            max="80"
+                            className={`w-full bg-slate-800 border ${validationErrors.targetRetirementAge ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                          />
+                          <p className="text-slate-400 text-xs mt-1">The age you want to stop working — your "Freedom Date"</p>
+                          {validationErrors.targetRetirementAge && (
+                            <p className="text-red-500 text-sm mt-1">{validationErrors.targetRetirementAge}</p>
+                          )}
+                        </div>
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Desired Monthly Net Income</label>
+                          <div className="relative">
+                            <span className="absolute left-4 top-3 text-slate-400">€</span>
+                            <input
+                              type="number"
+                              value={formData.desiredMonthlyIncome}
+                              onChange={(e) => updateFormData('desiredMonthlyIncome', Number(e.target.value))}
+                              placeholder="How much do you need to live comfortably?"
+                              className={`w-full bg-slate-800 border ${validationErrors.desiredMonthlyIncome ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
+                            />
+                          </div>
+                          {validationErrors.desiredMonthlyIncome && (
+                            <p className="text-red-500 text-sm mt-1">{validationErrors.desiredMonthlyIncome}</p>
+                          )}
+                        </div>
+                        <div>
+                          <label className="block text-white font-medium mb-2 text-sm">Life Expectancy (for modelling)</label>
+                          <input
+                            type="number"
+                            value={formData.lifeExpectancy}
+                            onChange={(e) => updateFormData('lifeExpectancy', Number(e.target.value))}
+                            min="65"
+                            max="110"
+                            className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
+                          />
+                          <p className="text-slate-400 text-xs mt-1">Default: 90. How long your nest egg must last.</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* AOW Start Date (Auto-Calculated) */}
+                    <div>
+                      <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                        <span className="text-lg">🏛️</span> AOW Start Date (Auto-Calculated)
+                      </h3>
+                      {(() => {
+                        const birthYear = new Date().getFullYear() - formData.age;
+                        const aowYear = birthYear + 67;
+                        let aowAgeLabel = '67 years';
+                        let aowMonths = 0;
+                        if (aowYear >= 2028 && aowYear <= 2031) {
+                          aowAgeLabel = '67 years and 3 months';
+                          aowMonths = 3;
+                        } else if (aowYear >= 2032) {
+                          aowAgeLabel = '67 years and 3 months+';
+                          aowMonths = 3;
+                        }
+                        const aowStartAge = 67 + aowMonths / 12;
+                        const bridgeYears = Math.max(0, Math.round((aowStartAge - formData.targetRetirementAge) * 10) / 10);
+                        const monthlyNeed = formData.desiredMonthlyIncome;
+                        const aowMonthlyGross = formData.hasSpouse ? 1187 : 1637;
+                        const employerPensionMonthly = Math.round(formData.builtUpPension / 12);
+                        const totalPensionIncome = aowMonthlyGross + employerPensionMonthly;
+                        const bridgeGap = Math.round(bridgeYears * 12 * monthlyNeed);
+                        const postAowMonthlyGap = Math.max(0, monthlyNeed - totalPensionIncome);
+                        const postAowYears = Math.max(0, formData.lifeExpectancy - aowStartAge);
+                        const postAowGap = Math.round(postAowMonthlyGap * 12 * postAowYears);
+                        const totalCapitalNeeded = bridgeGap + postAowGap;
+                        const currentWealth = formData.savingsBalance + formData.cryptoValueDec31 + (formData.propertyValue - formData.mortgageBalance);
+                        const wealthDelta = currentWealth - totalCapitalNeeded;
+
+                        return (
+                          <div className="space-y-6">
+                            {/* AOW info box */}
+                            <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
+                              <div className="flex items-center justify-between mb-2">
+                                <p className="text-slate-400 text-sm">Your projected AOW age</p>
+                                <span className="bg-emerald-500/20 text-emerald-400 px-3 py-1 rounded-full text-sm font-bold">{aowAgeLabel}</span>
+                              </div>
+                              <p className="text-slate-500 text-xs">Based on birth year ~{birthYear}. 2026–2027: 67 yrs • 2028–2031: 67 yrs 3 mo</p>
+                            </div>
+
+                            {/* The Bridge Phase Visual */}
+                            {bridgeYears > 0 && (
+                              <div>
+                                <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
+                                  <span className="text-lg">🌉</span> The Bridge Phase
+                                </h3>
+                                <div className="bg-slate-900/30 rounded-xl p-5 border border-slate-700">
+                                  {/* Timeline bar */}
+                                  <div className="mb-6">
+                                    <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
+                                      <span>Age {formData.targetRetirementAge}</span>
+                                      <span>Age {Math.ceil(aowStartAge)}</span>
+                                      <span>Age {formData.lifeExpectancy}</span>
+                                    </div>
+                                    <div className="w-full h-4 bg-slate-800 rounded-full overflow-hidden flex">
+                                      {(() => {
+                                        const totalYears = formData.lifeExpectancy - formData.targetRetirementAge;
+                                        const bridgePct = totalYears > 0 ? (bridgeYears / totalYears) * 100 : 0;
+                                        const aowPct = 100 - bridgePct;
+                                        return (
+                                          <>
+                                            <div
+                                              className="h-full bg-gradient-to-r from-red-500 to-amber-500 relative"
+                                              style={{ width: `${bridgePct}%` }}
+                                            >
+                                              <div className="absolute inset-0 flex items-center justify-center">
+                                                <span className="text-[10px] font-bold text-white drop-shadow">{Math.round(bridgeYears)}yr</span>
+                                              </div>
+                                            </div>
+                                            <div
+                                              className="h-full bg-gradient-to-r from-emerald-600 to-emerald-500 relative"
+                                              style={{ width: `${aowPct}%` }}
+                                            >
+                                              <div className="absolute inset-0 flex items-center justify-center">
+                                                <span className="text-[10px] font-bold text-white drop-shadow">{Math.round(postAowYears)}yr</span>
+                                              </div>
+                                            </div>
+                                          </>
+                                        );
+                                      })()}
+                                    </div>
+                                    <div className="flex items-center gap-4 mt-2">
+                                      <div className="flex items-center gap-1"><div className="w-3 h-3 rounded bg-gradient-to-r from-red-500 to-amber-500"></div><span className="text-xs text-slate-400">Bridge (self-funded)</span></div>
+                                      <div className="flex items-center gap-1"><div className="w-3 h-3 rounded bg-emerald-500"></div><span className="text-xs text-slate-400">AOW + Pension active</span></div>
+                                    </div>
+                                  </div>
+
+                                  {/* Warning */}
+                                  <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 mb-5">
+                                    <div className="flex items-start gap-3">
+                                      <span className="text-xl">⚠️</span>
+                                      <p className="text-red-300 text-sm leading-relaxed">
+                                        <strong className="text-red-200">Warning:</strong> You must independently finance the next <strong className="text-white">{Math.round(bridgeYears)} years</strong> before the government provides any support. That's <strong className="text-white">{Math.round(bridgeYears) * 12} months</strong> of living expenses from your own pocket.
+                                      </p>
+                                    </div>
+                                  </div>
+
+                                  {/* Wealth Burn-Rate Visual */}
+                                  <div className="mb-5">
+                                    <h4 className="text-white font-medium text-sm mb-3">Wealth Burn-Rate Projection</h4>
+                                    <div className="relative h-32 bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden p-3">
+                                      <svg viewBox="0 0 400 100" className="w-full h-full" preserveAspectRatio="none">
+                                        {/* Grid lines */}
+                                        <line x1="0" y1="25" x2="400" y2="25" stroke="#334155" strokeWidth="0.5" strokeDasharray="4" />
+                                        <line x1="0" y1="50" x2="400" y2="50" stroke="#334155" strokeWidth="0.5" strokeDasharray="4" />
+                                        <line x1="0" y1="75" x2="400" y2="75" stroke="#334155" strokeWidth="0.5" strokeDasharray="4" />
+                                        {(() => {
+                                          const totalYears = formData.lifeExpectancy - formData.targetRetirementAge;
+                                          if (totalYears <= 0) return null;
+                                          const bridgeFraction = bridgeYears / totalYears;
+                                          const bridgeX = bridgeFraction * 400;
+                                          const startY = 10;
+                                          const bridgeEndY = totalCapitalNeeded > 0 ? Math.min(90, startY + (bridgeGap / totalCapitalNeeded) * 70) : startY;
+                                          const endY = Math.min(95, bridgeEndY + (postAowGap > 0 ? 20 : 5));
+                                          return (
+                                            <>
+                                              {/* Bridge phase line (steep decline) */}
+                                              <line x1={bridgeX} y1="0" x2={bridgeX} y2="100" stroke="#f59e0b" strokeWidth="1" strokeDasharray="3" />
+                                              <path
+                                                d={`M 0 ${startY} C ${bridgeX * 0.5} ${startY + 10}, ${bridgeX * 0.8} ${bridgeEndY - 15}, ${bridgeX} ${bridgeEndY} C ${bridgeX + (400 - bridgeX) * 0.3} ${bridgeEndY + 5}, ${bridgeX + (400 - bridgeX) * 0.6} ${endY - 5}, 400 ${endY}`}
+                                                fill="none"
+                                                stroke="url(#burnGradient)"
+                                                strokeWidth="2.5"
+                                              />
+                                              <defs>
+                                                <linearGradient id="burnGradient" x1="0" y1="0" x2="400" y2="0" gradientUnits="userSpaceOnUse">
+                                                  <stop offset="0%" stopColor="#ef4444" />
+                                                  <stop offset={`${bridgeFraction * 100}%`} stopColor="#f59e0b" />
+                                                  <stop offset="100%" stopColor="#10b981" />
+                                                </linearGradient>
+                                              </defs>
+                                              <text x={bridgeX + 4} y="12" fill="#f59e0b" fontSize="8" fontWeight="bold">AOW starts</text>
+                                            </>
+                                          );
+                                        })()}
+                                      </svg>
+                                      <div className="absolute bottom-1 left-3 text-[10px] text-slate-500">Capital over time →</div>
+                                    </div>
+                                  </div>
+
+                                  {/* The "Gap to Fill" Counter */}
+                                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                                    <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-center">
+                                      <p className="text-slate-400 text-xs mb-1">Bridge Phase Cost</p>
+                                      <p className="text-red-400 text-2xl font-black">€{bridgeGap.toLocaleString()}</p>
+                                      <p className="text-slate-500 text-xs mt-1">{Math.round(bridgeYears)} yrs × €{monthlyNeed.toLocaleString()}/mo</p>
+                                    </div>
+                                    <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 text-center">
+                                      <p className="text-slate-400 text-xs mb-1">Post-AOW Shortfall</p>
+                                      <p className="text-amber-400 text-2xl font-black">€{postAowGap.toLocaleString()}</p>
+                                      <p className="text-slate-500 text-xs mt-1">€{postAowMonthlyGap.toLocaleString()}/mo gap × {Math.round(postAowYears)}yr</p>
+                                    </div>
+                                    <div className={`${wealthDelta >= 0 ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'} border rounded-lg p-4 text-center`}>
+                                      <p className="text-slate-400 text-xs mb-1">Total Capital Needed</p>
+                                      <p className={`${wealthDelta >= 0 ? 'text-emerald-400' : 'text-red-400'} text-2xl font-black`}>€{totalCapitalNeeded.toLocaleString()}</p>
+                                      <p className="text-slate-500 text-xs mt-1">Current wealth: €{currentWealth.toLocaleString()}</p>
+                                    </div>
+                                  </div>
+                                </div>
+                              </div>
+                            )}
+
+                            {/* Surplus / Deficit indicator */}
+                            <div className={`rounded-xl p-5 border ${wealthDelta >= 0 ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'}`}>
+                              <div className="flex items-center justify-between">
+                                <div>
+                                  <p className="text-slate-400 text-sm">{wealthDelta >= 0 ? 'Estimated Surplus' : 'Estimated Shortfall'}</p>
+                                  <p className={`text-3xl font-black ${wealthDelta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
+                                    {wealthDelta >= 0 ? '+' : ''}€{wealthDelta.toLocaleString()}
+                                  </p>
+                                </div>
+                                <span className="text-4xl">{wealthDelta >= 0 ? '✅' : '🚨'}</span>
+                              </div>
+                            </div>
+
+                            {/* Loss Aversion Psychological Teaser */}
+                            <div className="bg-gradient-to-r from-red-500/10 to-rose-500/10 border border-red-500/40 rounded-xl p-5">
+                              <div className="flex items-start gap-3">
+                                <span className="text-2xl">🏛️</span>
+                                <div>
+                                  <h4 className="text-red-400 font-bold mb-2">"The government just moved the goalposts."</h4>
+                                  <p className="text-slate-300 text-sm leading-relaxed">
+                                    Your AOW age is projected to be <strong className="text-white">{aowAgeLabel}</strong>, but inflation is rising faster than state benefits. A <strong className="text-white">€{Math.round(postAowMonthlyGap > 0 ? postAowMonthlyGap : 1500).toLocaleString()}/month</strong> shortfall during your bridge years could cost you <strong className="text-red-300">€{Math.round((postAowMonthlyGap > 0 ? postAowMonthlyGap : 1500) * 12 * bridgeYears).toLocaleString()}</strong> in extra savings. <strong className="text-emerald-400">Get the full 'Safe Withdrawal' roadmap in your PDF</strong> to ensure you never run out of money.
+                                  </p>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })()}
+                    </div>
                   </div>
 
                   <div className="flex items-center justify-between mt-8 sm:mt-12">
