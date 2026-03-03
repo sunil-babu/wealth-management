@@ -44,7 +44,7 @@ const log = {
 
 // Security & middleware
 app.use(helmet());
-app.use(express.json({ limit: '10kb' }));
+app.use(express.json({ limit: '100kb' }));
 app.use(express.static(path.join(__dirname, 'public'), { maxAge: '1d' }));
 
 // Increase timeout for long-running AI requests
@@ -83,6 +83,14 @@ const validateAiRequest = (body) => {
   if (!body || typeof body !== 'object') return 'Invalid request body';
   if (typeof body.prompt !== 'string' || body.prompt.length === 0) return 'Missing or invalid prompt';
   if (body.prompt.length > 5000) return 'Prompt exceeds max length (5000)';
+  return null;
+};
+
+// Input validation for PDF requests (longer prompts allowed)
+const validatePdfRequest = (body) => {
+  if (!body || typeof body !== 'object') return 'Invalid request body';
+  if (typeof body.prompt !== 'string' || body.prompt.length === 0) return 'Missing or invalid prompt';
+  if (body.prompt.length > 50000) return 'Prompt exceeds max length (50000)';
   return null;
 };
 
@@ -246,6 +254,96 @@ app.post('/api/vertex', async (req, res) => {
       return res.status(503).json({ error: 'Network error connecting to AI service. Please try again.' });
     }
     log.error('Unexpected error', { requestId, message: err.message, stack: err.stack });
+    res.status(500).json({ error: 'Internal server error', details: err.message });
+  }
+});
+
+// Premium PDF generation endpoint (longer prompts, higher token output)
+app.post('/api/vertex-pdf', async (req, res) => {
+  const requestId = 'pdf-' + Math.random().toString(36).substring(7);
+  console.log('\n=== PDF VERTEX ENDPOINT CALLED ===');
+  
+  try {
+    const validationError = validatePdfRequest(req.body);
+    if (validationError) {
+      return res.status(400).json({ error: validationError });
+    }
+
+    const vertexUrl = process.env.VERTEX_API_URL;
+    const vertexProject = process.env.GOOGLE_CLOUD_PROJECT;
+    
+    if (!vertexUrl || !vertexProject) {
+      return res.status(501).json({ error: 'Vertex AI not configured' });
+    }
+
+    let token = '';
+    try {
+      token = await auth.getAccessToken();
+    } catch (authErr) {
+      return res.status(401).json({ error: 'Failed to authenticate with Vertex AI' });
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 300000);
+
+    const isGeminiModel = vertexUrl.includes('gemini');
+    let resp;
+
+    if (isGeminiModel) {
+      const geminiUrl = vertexUrl.replace(':predict', ':generateContent');
+      const geminiBody = {
+        contents: [{ role: 'user', parts: [{ text: req.body.prompt }] }],
+        generationConfig: {
+          temperature: 0.5,
+          topP: 0.8,
+          topK: 40,
+          maxOutputTokens: 8192,
+          candidateCount: 1
+        },
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_MEDIUM_AND_ABOVE' }
+        ]
+      };
+
+      resp = await fetch(geminiUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+          'Connection': 'keep-alive'
+        },
+        body: JSON.stringify(geminiBody),
+        signal: controller.signal
+      });
+    } else {
+      resp = await fetch(vertexUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ instances: [{ prompt: req.body.prompt }] }),
+        signal: controller.signal
+      });
+    }
+
+    clearTimeout(timeout);
+
+    if (!resp.ok) {
+      const errText = await resp.text();
+      return res.status(resp.status).json({ error: 'AI service error', details: errText });
+    }
+
+    const data = await resp.json();
+    log.info('PDF AI response sent', { requestId, responseSize: JSON.stringify(data).length });
+    res.status(200).json(data);
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      return res.status(504).json({ error: 'Request timed out' });
+    }
     res.status(500).json({ error: 'Internal server error', details: err.message });
   }
 });

@@ -73,6 +73,705 @@ export default function App() {
   const [expandTax2024, setExpandTax2024] = useState(false);
   const [expandTax2028, setExpandTax2028] = useState(false);
 
+  // Disclaimer page state
+  const [showDisclaimer, setShowDisclaimer] = useState(false);
+
+  // Box3 detailed comparison page state
+  const [showBox3Comparison, setShowBox3Comparison] = useState(false);
+  const [box3SimMode, setBox3SimMode] = useState('deterministic'); // 'deterministic' | 'monteCarlo'
+  const [box3PortfolioType, setBox3PortfolioType] = useState('growth'); // 'conservative' | 'balanced' | 'growth' | 'aggressive'
+  const [box3MonthlySavings, setBox3MonthlySavings] = useState(2000);
+  const [box3StartingCapital, setBox3StartingCapital] = useState(10000);
+  const [box3FireAge, setBox3FireAge] = useState(52);
+  const [box3LifeExpectancy, setBox3LifeExpectancy] = useState(80);
+  const [box3AnnualWithdrawal, setBox3AnnualWithdrawal] = useState(50000);
+
+  // Payment state
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [paymentProcessing, setPaymentProcessing] = useState(false);
+  const [paymentSuccess, setPaymentSuccess] = useState(false);
+  const [pdfGenerating, setPdfGenerating] = useState(false);
+  const [pdfReady, setPdfReady] = useState(false);
+  const [disclaimerAccepted, setDisclaimerAccepted] = useState(false);
+  const [pdfContent, setPdfContent] = useState(null);
+
+  // Mock Stripe payment handler
+  const handlePurchasePDF = () => {
+    setShowPaymentModal(true);
+    setPaymentProcessing(false);
+    setPaymentSuccess(false);
+    setPdfGenerating(false);
+    setPdfReady(false);
+    setPdfContent(null);
+    setDisclaimerAccepted(false);
+  };
+
+  const handleMockPayment = () => {
+    setPaymentProcessing(true);
+    // Simulate Stripe processing delay
+    setTimeout(() => {
+      setPaymentProcessing(false);
+      setPaymentSuccess(true);
+      // Auto-trigger PDF generation after payment
+      generatePremiumPDF();
+    }, 2000);
+  };
+
+  const generatePremiumPDF = async () => {
+    setPdfGenerating(true);
+    setPdfReady(false);
+
+    // Pre-computed values for prompt
+    const age = parseInt(formData.age) || 30;
+    const aowPct = Math.max(0, Math.min(100, (50 - formData.yearsAbroad) * 2));
+    const bridgeYrs = Math.max(0, Math.round((67.25 - formData.targetRetirementAge) * 10) / 10);
+    const bridgeCost = Math.round(bridgeYrs * 12 * formData.desiredMonthlyIncome);
+    const netWealth = formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue - formData.mortgageBalance;
+    const equity = formData.propertyValue - formData.mortgageBalance;
+    const p3Room = formData.jaarruimte + formData.reserveringsruimte;
+    const aowShortfall = Math.round((1 - aowPct / 100) * 1637);
+    const arrivalAge = formData.arrivalAgeNL || (age - (50 - formData.yearsAbroad));
+    const stockValue = formData.cryptoValueDec31 + (formData.investmentAmount || 0);
+    const totalBox3 = formData.savingsBalance + formData.cryptoValueDec31;
+    const fictitiousTax2026 = Math.round(0.36 * (stockValue * 0.06 + formData.savingsBalance * 0.0144) - (formData.hasSpouse ? 114000 : 57000) * 0.0144 * 0.36);
+    const retirementYears = formData.lifeExpectancy - formData.targetRetirementAge;
+    const yearsToFire = Math.max(0, formData.targetRetirementAge - age);
+    const inflationRate = 0.022;
+    const inflationMultiplier = Math.pow(1 + inflationRate, yearsToFire);
+    const futureMonthlyNeed = Math.round(formData.desiredMonthlyIncome * inflationMultiplier);
+    const futureBridgeCost = Math.round(bridgeYrs * 12 * futureMonthlyNeed);
+
+    const premiumPrompt = `Role: You are a Senior Dutch & International Wealth Architect specializing in FIRE (Financial Independence, Retire Early).
+Goal: Generate a high-stakes, 2026-optimized Wealth Protection & Early Retirement Roadmap.
+Tone: Professional, urgent, and advisor-grade. Use psychological loss aversion: highlight "leaking wealth" to motivate action.
+
+Context (2026-2028 Dutch Tax Landscape):
+- 2026-2027: Transitional Box 3 system using fictitious returns (Savings 1.44%, Stocks/Other 6.00%, Debt 2.62%).
+- 2028: Full "Actual Returns" Capital Accrual Tax on stocks/crypto (36% tax on annual paper gains).
+- Mortgage: Interest deduction (HRA) is 37.56% in 2026.
+- AOW: Accrual is 2% per year of residency in NL (50 years for 100% benefit).
+- Box 3 Exemption: €${formData.hasSpouse ? '114,000' : '57,000'} (${formData.hasSpouse ? 'partnered' : 'single'}).
+
+CLIENT PROFILE:
+Age: ${age} | FIRE Target: ${formData.targetRetirementAge} | Need: €${formData.desiredMonthlyIncome}/mo until ${formData.lifeExpectancy}
+${formData.hasSpouse ? 'Partnered' : 'Single'}${formData.hasChildren ? ' | Children: ' + formData.childrenCount : ''}
+Salary: €${formData.grossSalary}${formData.hasSpouse ? ' | Spouse: €' + formData.spouseGrossSalary : ''} | 30% Ruling: ${formData.has30PercentRuling ? 'Yes' : 'No'}
+Savings: €${formData.savingsBalance} (interest €${formData.interestEarned})
+Crypto/Stocks: Jan €${formData.cryptoValueJan1} → Dec €${formData.cryptoValueDec31} | Dividends: €${formData.dividendsReceived}
+Property: WOZ €${formData.propertyValue} | Mortgage €${formData.mortgageBalance} @${formData.mortgageInterestRate}% (${formData.mortgageYearsLeft}yr left) | Equity: €${equity.toLocaleString()}
+${formData.targetPropertyValue > 0 ? 'Upgrade Target: €' + formData.targetPropertyValue.toLocaleString() : ''}
+Rental: €${formData.rentalIncome} | Prior Loss: €${formData.priorYearLoss}
+Pension P1: AOW ${aowPct}% (abroad ${formData.yearsAbroad}yr, gap €${aowShortfall}/mo) | Arrival age: ${arrivalAge}
+Pension P2: €${formData.builtUpPension}/yr | Factor A: €${formData.factorA}${formData.hasSpouse ? ' | Spouse P2: €' + formData.spouseBuiltUpPension + '/yr FA: €' + formData.spouseFactorA : ''}
+Pension P3: Jaarruimte €${formData.jaarruimte} | Reserveringsruimte €${formData.reserveringsruimte}
+Bridge Phase: ${Math.round(bridgeYrs)} years = €${bridgeCost.toLocaleString()} self-funded
+Net Wealth: €${netWealth.toLocaleString()} | SWR Need: €${Math.round(formData.desiredMonthlyIncome * 12 / 0.04).toLocaleString()} @4%
+
+INFLATION LOGIC (CRITICAL — apply throughout ALL sections):
+- Standard NL Inflation Assumption: 2.2% annually.
+- Years to FIRE: ${yearsToFire}
+- Today's Monthly Need: €${formData.desiredMonthlyIncome.toLocaleString()} → Inflation-Adjusted at FIRE: €${futureMonthlyNeed.toLocaleString()}/mo (= €${formData.desiredMonthlyIncome.toLocaleString()} × (1.022)^${yearsToFire}).
+- Real Rate of Return: Use (Nominal Return − 2.2%) for ALL growth projections so every € figure is in "Today's Euro" purchasing power.
+- Bridge Phase (inflation-adjusted): €${futureBridgeCost.toLocaleString()} (${Math.round(bridgeYrs)} yrs × 12 × €${futureMonthlyNeed.toLocaleString()}).
+- SWR Nest-Egg Target (inflation-adjusted): €${Math.round(futureMonthlyNeed * 12 / 0.04).toLocaleString()} @4%.
+- All € amounts in sections below MUST reflect inflation-adjusted values. Always show both today's and future euros where relevant.
+
+OUTPUT: Return a comprehensive structured report with these exact sections. Use markdown formatting (## for headings, **bold** for emphasis, - for bullets). Include specific € amounts for every recommendation.
+
+## SECTION 1: THE WEALTH SHIELD (2028 Preparedness)
+
+Analyze the client's Box 3 exposure (total €${totalBox3.toLocaleString()}).
+- Current 2026 fictitious tax estimate vs 2028 Capital Accrual Tax on €${stockValue.toLocaleString()} in stocks/crypto.
+- Calculate the "Wealth Leak" (annual tax cost of doing nothing).
+- Explain the Rebuttal Scheme (Opgaaf werkelijk rendement) for 2026 if real gains < 6%.
+- Warn about 36% tax on unrealized paper gains from 2028.
+- Specific restructuring steps with € amounts.
+
+## SECTION 2: PILLAR 1 & 2 PENSION AUDIT
+
+- AOW gap: ${aowPct}% coverage (${formData.yearsAbroad} years abroad). Monthly shortfall: €${aowShortfall}.
+- Audit Factor A (€${formData.factorA}): calculate remaining Jaarruimte and Reserveringsruimte.
+- P2 built-up: €${formData.builtUpPension}/yr = €${Math.round(formData.builtUpPension / 12)}/mo.
+- Total pension gap vs €${formData.desiredMonthlyIncome}/mo target.
+- Options to fill: voluntary AOW buy-back, Lijfrente, extra P2 contributions.
+
+## SECTION 3: REAL ESTATE OPTIMIZATION
+
+Equity: €${equity.toLocaleString()} locked in primary residence.
+- Bigger House Strategy: Moving wealth from Box 3 (taxed) to Box 1 (exempt). Calculate tax savings for a €${(formData.targetPropertyValue || formData.propertyValue + 200000).toLocaleString()} upgrade.
+- HRA deduction: 37.56% in 2026. Only for repayment mortgages within 30 years.
+- Eigenwoningforfait: 0.35% of WOZ (€${Math.round(formData.propertyValue * 0.0035).toLocaleString()}/yr) vs 2.35% above €1.3M.
+- Investment property analysis if applicable (rental €${formData.rentalIncome}).
+
+## SECTION 4: FAMILY WEALTH TRANSFER
+
+${formData.hasChildren ? `Children: ${formData.childrenCount}. Optimize intergenerational wealth:` : 'Even without children, consider:'}
+- Tax-free gifting 2026: €6,908 annually per child (€13,816 from both parents).
+- One-time enlarged gift: €33,129 per child (age 18-40).
+- "Schenken op papier" (Paper Gifting): Keep money but owe child 6% interest. This interest is deductible as Box 3 debt, reducing taxable base.
+- Set up notarial deed for paper gifts.
+- Impact on Box 3: €${formData.hasChildren ? Math.round(formData.childrenCount * 6908).toLocaleString() : '6,908'} shift per year.
+
+## SECTION 5: PILLAR 3 TAX SHIELD
+
+Room available: €${p3Room.toLocaleString()} (Jaarruimte €${formData.jaarruimte} + Reserveringsruimte €${formData.reserveringsruimte}).
+- Immediate tax refund: 37-49.5% = €${Math.round(p3Room * 0.37).toLocaleString()} to €${Math.round(p3Room * 0.495).toLocaleString()}.
+- Box 3 shield: Assets move from taxable Box 3 to exempt Lijfrente.
+- Recommended providers: Brand New Day, Meesman (low-cost index Lijfrente).
+- Spouse optimization if applicable.
+
+## SECTION 6: GLOBAL RETIREMENT (Geo-Arbitrage)
+
+Compare 10 retirement destinations with Dutch tax treaty benefits for someone with €${formData.desiredMonthlyIncome.toLocaleString()}/mo budget:
+
+| Country | Tax on NL Pension | Tax on Investments | Healthcare | Cost of Living | Treaty Benefit |
+For each: Portugal (NHR 10%), Italy (7% Southern flat), Malta (OECD treaty), Spain (Madrid 0% wealth tax), Greece (7% flat), Cyprus (0% dividends), Panama (territorial), Costa Rica (territorial), France (social charges), Malaysia (territorial).
+
+## SECTION 7: BRIDGE PHASE STRATEGY
+
+Age ${formData.targetRetirementAge} → 67 = ${Math.round(bridgeYrs)} years, €${bridgeCost.toLocaleString()} needed.
+- Drawdown sequence: which accounts to tap first (Box 3 savings → Lijfrente → P2).
+- Tax-efficient withdrawal: stay below Box 1 brackets.
+- Emergency buffer sizing (6-12 months expenses).
+
+## SECTION 8: THE FINAL VERDICT
+
+Simulation: "Retire at ${formData.targetRetirementAge}" vs "Retire at ${Math.min(formData.targetRetirementAge + 10, 65)}"
+- Wealth at retirement, monthly income, tax burden, lifestyle comparison.
+- Safe Withdrawal Rate analysis over ${retirementYears} years.
+- Break-even point and risk assessment.
+- Final recommended retirement date with confidence level.
+
+End with a "CRITICAL ACTIONS" summary: Top 5 things to do THIS MONTH with specific € amounts.
+
+IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph about yourself or your role. Start directly with SECTION 1. Do not introduce yourself or explain what you are doing.`;
+
+    try {
+      const response = await fetch('/api/vertex-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ prompt: premiumPrompt }),
+      });
+
+      if (!response.ok) {
+        const errBody = await response.text();
+        console.error('PDF API error:', response.status, errBody);
+        throw new Error(`Server error ${response.status}: ${errBody}`);
+      }
+
+      const result = await response.json();
+      
+      let responseText = '';
+      if (result.candidates && result.candidates[0] && result.candidates[0].content && result.candidates[0].content.parts) {
+        responseText = result.candidates[0].content.parts[0].text;
+      } else if (result.text) {
+        responseText = result.text;
+      } else if (result.response) {
+        responseText = result.response;
+      } else {
+        responseText = JSON.stringify(result, null, 2);
+      }
+
+      if (!responseText || responseText.trim().length === 0) {
+        throw new Error('Empty response from AI service');
+      }
+
+      setPdfContent(responseText);
+      setPdfReady(true);
+      setPdfGenerating(false);
+    } catch (err) {
+      console.error('PDF generation error:', err);
+      // Fallback: use existing AI response if available
+      if (aiResponse && aiResponse.trim().length > 0) {
+        setPdfContent(aiResponse);
+        setPdfReady(true);
+      } else {
+        setPdfContent('## Error Generating Report\n\nThe AI service could not generate your premium report at this time. Please try again later or contact support.\n\n**Error:** ' + err.message);
+        setPdfReady(true);
+      }
+      setPdfGenerating(false);
+    }
+  };
+
+  const handleDownloadPDF = () => {
+    const content = pdfContent || aiResponse;
+    const dateStr = new Date().toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
+    const netWealth = formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue - formData.mortgageBalance;
+    const age = parseInt(formData.age) || 30;
+    const aowPct = Math.max(0, Math.min(100, (50 - formData.yearsAbroad) * 2));
+    const aowShortfall = Math.round((1 - aowPct / 100) * 1637);
+    const aowMonthly = Math.round(1637 * aowPct / 100);
+    const yearsInNL = 50 - formData.yearsAbroad;
+    const equity = formData.propertyValue - formData.mortgageBalance;
+    const p3Room = formData.jaarruimte + formData.reserveringsruimte;
+    const p3RefundLow = Math.round(p3Room * 0.37);
+    const p3RefundHigh = Math.round(p3Room * 0.495);
+    const bridgeYrs = Math.max(0, Math.round((67.25 - formData.targetRetirementAge) * 10) / 10);
+    const bridgeCost = Math.round(bridgeYrs * 12 * formData.desiredMonthlyIncome);
+    const stockValue = formData.cryptoValueDec31 + (formData.investmentAmount || 0);
+    const totalBox3 = formData.savingsBalance + formData.cryptoValueDec31;
+    const fictitiousTax = Math.max(0, Math.round(0.36 * (stockValue * 0.06 + formData.savingsBalance * 0.0144) - (formData.hasSpouse ? 114000 : 57000) * 0.0144 * 0.36));
+    const p2Monthly = Math.round(formData.builtUpPension / 12);
+    const p2Coverage = formData.desiredMonthlyIncome > 0 ? Math.min(100, Math.round((p2Monthly / formData.desiredMonthlyIncome) * 100)) : 0;
+    const yearsToFire = Math.max(0, formData.targetRetirementAge - age);
+    const inflationMultiplier = Math.pow(1.022, yearsToFire);
+    const futureMonthlyNeed = Math.round(formData.desiredMonthlyIncome * inflationMultiplier);
+    const taxLeakAnnual = fictitiousTax;
+    const isWealthLeaking = taxLeakAnnual > 2000;
+    const isAchievable = metrics.gapToFill < netWealth * 0.8;
+
+    // Parse markdown tables into HTML tables 
+    const parseMarkdownTable = (lines, startIdx) => {
+      let html = '<table><thead><tr>';
+      const headers = lines[startIdx].split('|').filter(c => c.trim());
+      headers.forEach(h => { html += '<th>' + h.trim() + '</th>'; });
+      html += '</tr></thead><tbody>';
+      for (let i = startIdx + 2; i < lines.length; i++) {
+        if (!lines[i].trim().startsWith('|')) break;
+        const cells = lines[i].split('|').filter(c => c.trim());
+        html += '<tr>';
+        cells.forEach(c => { html += '<td>' + c.trim() + '</td>'; });
+        html += '</tr>';
+      }
+      html += '</tbody></table>';
+      return html;
+    };
+
+    // Convert markdown content to HTML with enhanced formatting
+    const lines = content.split('\n');
+    let contentHtml = '';
+    let inTable = false;
+    let inList = false;
+    for (let i = 0; i < lines.length; i++) {
+      const t = lines[i].trim();
+      if (!t) { if (inList) { contentHtml += '</ul>'; inList = false; } contentHtml += ''; continue; }
+      // Table
+      if (t.startsWith('|') && !inTable) {
+        if (inList) { contentHtml += '</ul>'; inList = false; }
+        inTable = true;
+        contentHtml += parseMarkdownTable(lines, i);
+        while (i + 1 < lines.length && lines[i + 1].trim().startsWith('|')) i++;
+        inTable = false;
+        continue;
+      }
+      if (t.startsWith('|')) continue; // skip remaining table rows already handled
+      // Headings - map to section dividers
+      if (t.startsWith('## SECTION') || t.startsWith('## ')) {
+        if (inList) { contentHtml += '</ul>'; inList = false; }
+        const title = t.replace(/^#+\s*/, '').replace(/\*\*/g, '');
+        contentHtml += '<div class="section-divider"></div><h2>' + title + '</h2>';
+        continue;
+      }
+      if (t.startsWith('### ') || (t.startsWith('**') && t.endsWith('**') && !t.startsWith('- '))) {
+        if (inList) { contentHtml += '</ul>'; inList = false; }
+        contentHtml += '<h3>' + t.replace(/^###?\s*/, '').replace(/\*\*/g, '') + '</h3>';
+        continue;
+      }
+      // List items
+      if (t.startsWith('- ') || t.startsWith('* ')) {
+        if (!inList) { contentHtml += '<ul>'; inList = true; }
+        contentHtml += '<li>' + t.replace(/^[-*]\s*/, '').replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>') + '</li>';
+        continue;
+      } else if (inList) {
+        contentHtml += '</ul>'; inList = false;
+      }
+      // Warning/Critical callouts
+      if (t.includes('WARNING') || t.includes('Wealth Leak') || t.includes('CRITICAL') || t.includes('⚠') || t.includes('🚨')) {
+        contentHtml += '<div class="callout-warning">' + t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>') + '</div>';
+        continue;
+      }
+      // Normal paragraph
+      contentHtml += '<p>' + t.replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>') + '</p>';
+    }
+    if (inList) contentHtml += '</ul>';
+
+    // Country comparison cards data
+    const countries = [
+      { flag: '🇵🇹', name: 'Portugal', tax: 'NHR 10% flat', benefit: 'Low tax on foreign income' },
+      { flag: '🇮🇹', name: 'Italy', tax: '7% flat (South)', benefit: 'Southern Italy incentive' },
+      { flag: '🇪🇸', name: 'Spain', tax: 'Progressive', benefit: 'Madrid 0% wealth tax' },
+      { flag: '🇲🇹', name: 'Malta', tax: 'Remittance basis', benefit: 'OECD treaty benefits' },
+      { flag: '🇬🇷', name: 'Greece', tax: '7% flat', benefit: 'Pension income incentive' },
+      { flag: '🇨🇾', name: 'Cyprus', tax: '0% dividends', benefit: 'No capital gains tax' },
+      { flag: '🇵🇦', name: 'Panama', tax: 'Territorial', benefit: 'Foreign income exempt' },
+      { flag: '🇨🇷', name: 'Costa Rica', tax: 'Territorial', benefit: 'Foreign income exempt' },
+      { flag: '🇫🇷', name: 'France', tax: '30% PFU', benefit: 'Social charges apply' },
+      { flag: '🇲🇾', name: 'Malaysia', tax: 'Territorial', benefit: 'MM2H visa program' },
+    ];
+
+    // Build the full premium HTML template
+    const htmlContent = `<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>ProsperPath - Premium Wealth Strategy Report</title>
+<style>
+  /* === GLOBAL === */
+  @page { margin: 1.5cm 2cm; size: A4; }
+  @media print { .page-break { page-break-before: always; } }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Georgia', 'Times New Roman', serif; color: #e2e8f0; line-height: 1.7; background: #0f172a; }
+  .container { max-width: 780px; margin: 0 auto; padding: 0 32px; }
+
+  /* === FRONT PAGE === */
+  .front-page { background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%); min-height: 100vh; padding: 60px 0; position: relative; overflow: hidden; }
+  .front-page::before { content: ''; position: absolute; top: -50%; right: -30%; width: 600px; height: 600px; background: radial-gradient(circle, rgba(16,185,129,0.08) 0%, transparent 70%); border-radius: 50%; }
+  .fp-badge { display: inline-block; background: linear-gradient(135deg, #059669, #10b981); color: white; padding: 6px 20px; border-radius: 4px; font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 24px; }
+  .fp-title { font-size: 36px; color: #f1f5f9; line-height: 1.2; margin-bottom: 8px; }
+  .fp-subtitle { font-size: 18px; color: #10b981; font-weight: 400; font-style: italic; margin-bottom: 40px; }
+
+  /* Memo header */
+  .memo-header { background: rgba(30,41,59,0.6); border: 1px solid #334155; border-radius: 8px; padding: 20px 24px; margin-bottom: 36px; font-family: 'Segoe UI', Arial, sans-serif; }
+  .memo-row { display: flex; margin-bottom: 6px; font-size: 13px; }
+  .memo-label { color: #64748b; width: 80px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; flex-shrink: 0; }
+  .memo-value { color: #cbd5e1; }
+
+  /* Six-tile summary */
+  .tile-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 36px; }
+  .tile { background: rgba(30,41,59,0.7); border: 1px solid #334155; border-radius: 10px; padding: 20px 16px; text-align: center; position: relative; }
+  .tile .tile-label { font-family: 'Segoe UI', Arial, sans-serif; font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 8px; }
+  .tile .tile-value { font-size: 26px; font-weight: 700; color: #10b981; font-family: 'Segoe UI', Arial, sans-serif; }
+  .tile .tile-value.allocation { font-size: 16px; }
+  .tile .tile-sub { font-size: 11px; color: #64748b; margin-top: 4px; font-family: 'Segoe UI', Arial, sans-serif; }
+
+  /* Status indicators */
+  .status-bar { display: flex; gap: 12px; margin-bottom: 40px; }
+  .status-pill { display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border-radius: 8px; font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px; font-weight: 600; }
+  .status-pill.leak { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.3); color: #fbbf24; }
+  .status-pill.ok { background: rgba(16,185,129,0.12); border: 1px solid rgba(16,185,129,0.3); color: #34d399; }
+  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
+  .status-dot.leak { background: #f59e0b; }
+  .status-dot.ok { background: #10b981; }
+
+  /* === SECTION STYLES === */
+  .section-divider { height: 1px; background: linear-gradient(to right, transparent, #334155, transparent); margin: 48px 0 32px; }
+  h2 { font-size: 22px; color: #f1f5f9; border-left: 4px solid #10b981; padding-left: 16px; margin: 40px 0 16px; font-family: 'Georgia', 'Times New Roman', serif; }
+  h3 { font-size: 15px; color: #10b981; margin: 20px 0 8px; font-family: 'Segoe UI', Arial, sans-serif; font-weight: 700; }
+  p { margin: 8px 0; font-size: 13.5px; color: #cbd5e1; font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.75; }
+  strong { color: #f1f5f9; }
+  ul { padding-left: 0; list-style: none; margin: 8px 0; }
+  li { margin: 6px 0; font-size: 13.5px; color: #cbd5e1; padding-left: 20px; position: relative; font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; }
+  li::before { content: "▸"; color: #10b981; font-weight: bold; position: absolute; left: 0; }
+
+  /* Callouts */
+  .callout-warning { background: rgba(245,158,11,0.08); border-left: 4px solid #f59e0b; padding: 14px 18px; border-radius: 6px; margin: 16px 0; font-size: 13px; color: #fde68a; font-family: 'Segoe UI', Arial, sans-serif; }
+
+  /* Data cards */
+  .data-card { background: rgba(30,41,59,0.5); border: 1px solid #334155; border-radius: 10px; padding: 20px; margin: 16px 0; }
+  .data-card-title { font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 10px; }
+  .data-card .big-number { font-size: 32px; font-weight: 700; color: #10b981; font-family: 'Segoe UI', Arial, sans-serif; }
+  .data-card .big-number.warning { color: #f59e0b; }
+  .data-card .big-number.danger { color: #ef4444; }
+  .data-card .big-number.blue { color: #60a5fa; }
+
+  /* Accrual timeline bar */
+  .timeline-bar { display: flex; height: 28px; border-radius: 6px; overflow: hidden; margin: 12px 0 8px; }
+  .timeline-filled { background: linear-gradient(90deg, #059669, #10b981); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: white; font-family: 'Segoe UI', Arial, sans-serif; }
+  .timeline-gap { background: #334155; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #64748b; font-family: 'Segoe UI', Arial, sans-serif; }
+
+  /* Gauge */
+  .gauge-row { display: flex; align-items: center; gap: 24px; margin: 16px 0; }
+  .gauge-track { flex: 1; height: 10px; background: #1e293b; border-radius: 5px; overflow: hidden; }
+  .gauge-fill { height: 100%; border-radius: 5px; background: linear-gradient(90deg, #10b981, #34d399); }
+  .gauge-label { font-family: 'Segoe UI', Arial, sans-serif; font-size: 28px; font-weight: 700; color: #10b981; min-width: 70px; text-align: right; }
+
+  /* Badge */
+  .badge-row { display: flex; gap: 10px; margin: 12px 0; flex-wrap: wrap; }
+  .badge { display: inline-block; padding: 5px 14px; border-radius: 20px; font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; font-weight: 700; }
+  .badge.red { background: rgba(239,68,68,0.15); color: #fca5a5; border: 1px solid rgba(239,68,68,0.3); }
+  .badge.green { background: rgba(16,185,129,0.15); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.3); }
+  .badge.amber { background: rgba(245,158,11,0.15); color: #fde68a; border: 1px solid rgba(245,158,11,0.3); }
+  .badge.blue { background: rgba(96,165,250,0.15); color: #93c5fd; border: 1px solid rgba(96,165,250,0.3); }
+
+  /* Before-After comparison */
+  .comparison-row { display: flex; gap: 16px; margin: 16px 0; }
+  .comparison-box { flex: 1; border-radius: 10px; padding: 18px; text-align: center; }
+  .comparison-box.before { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25); }
+  .comparison-box.after { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); }
+  .comparison-box .cb-label { font-family: 'Segoe UI', Arial, sans-serif; font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 8px; }
+  .comparison-box.before .cb-label { color: #fca5a5; }
+  .comparison-box.after .cb-label { color: #6ee7b7; }
+  .comparison-box .cb-value { font-size: 22px; font-weight: 700; font-family: 'Segoe UI', Arial, sans-serif; }
+  .comparison-box.before .cb-value { color: #f87171; }
+  .comparison-box.after .cb-value { color: #34d399; }
+  .comparison-box .cb-desc { font-size: 11px; color: #64748b; margin-top: 4px; font-family: 'Segoe UI', Arial, sans-serif; }
+
+  /* Country cards */
+  .country-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; }
+  .country-card { background: rgba(30,41,59,0.5); border: 1px solid #334155; border-radius: 8px; padding: 14px; }
+  .country-card .cc-name { font-size: 14px; font-weight: 700; color: #f1f5f9; margin-bottom: 6px; font-family: 'Segoe UI', Arial, sans-serif; }
+  .country-card .cc-tax { font-size: 11px; color: #10b981; font-family: 'Segoe UI', Arial, sans-serif; }
+  .country-card .cc-benefit { font-size: 11px; color: #64748b; margin-top: 2px; font-family: 'Segoe UI', Arial, sans-serif; }
+
+  /* Bridge Gantt */
+  .gantt-bar-container { margin: 16px 0; }
+  .gantt-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
+  .gantt-label { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; color: #94a3b8; width: 90px; text-align: right; flex-shrink: 0; }
+  .gantt-track { flex: 1; height: 22px; background: #1e293b; border-radius: 4px; position: relative; overflow: hidden; }
+  .gantt-fill { height: 100%; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: white; font-family: 'Segoe UI', Arial, sans-serif; }
+  .gantt-fill.savings { background: linear-gradient(90deg, #10b981, #34d399); }
+  .gantt-fill.lijfrente { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
+  .gantt-fill.p2 { background: linear-gradient(90deg, #8b5cf6, #a78bfa); }
+  .gantt-fill.aow { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
+
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px; }
+  th { background: #1e293b; color: #94a3b8; padding: 10px 14px; text-align: left; font-weight: 700; text-transform: uppercase; font-size: 10px; letter-spacing: 1px; border-bottom: 2px solid #334155; }
+  td { padding: 10px 14px; border-bottom: 1px solid #1e293b; color: #cbd5e1; }
+  tr:nth-child(even) td { background: rgba(30,41,59,0.3); }
+
+  /* Seal */
+  .verified-seal { display: inline-flex; align-items: center; gap: 6px; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.3); padding: 6px 14px; border-radius: 20px; font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; font-weight: 600; color: #34d399; margin: 8px 0; }
+
+  /* Footer & Disclaimer */
+  .disclaimer { background: rgba(30,41,59,0.5); border: 1px solid #334155; border-radius: 8px; padding: 18px 22px; margin-top: 48px; font-size: 11px; color: #64748b; font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; }
+  .disclaimer strong { color: #94a3b8; }
+  .report-footer { text-align: center; margin-top: 40px; padding-top: 24px; border-top: 1px solid #1e293b; color: #475569; font-size: 11px; font-family: 'Segoe UI', Arial, sans-serif; }
+  .report-footer .brand { color: #10b981; font-weight: 700; }
+</style>
+</head>
+<body>
+
+<!-- ============ FRONT PAGE ============ -->
+<div class="front-page">
+  <div class="container">
+    <div class="fp-badge">WEALTH STRATEGY</div>
+    <h1 class="fp-title">Wealth Protection &amp;<br>Early Retirement Roadmap</h1>
+    <p class="fp-subtitle">2026 Dutch FIRE &amp; International Tax Strategy</p>
+
+    <!-- Memo Header -->
+    <div class="memo-header">
+      <div class="memo-row"><span class="memo-label">Date</span><span class="memo-value">${dateStr}</span></div>
+      <div class="memo-row"><span class="memo-label">To</span><span class="memo-value">${formData.fullName || 'Client'} — ${formData.hasSpouse ? 'Household' : 'Individual'}, Age ${formData.age}</span></div>
+      <div class="memo-row"><span class="memo-label">From</span><span class="memo-value">Senior Dutch &amp; International Wealth Architect</span></div>
+      <div class="memo-row"><span class="memo-label">Subject</span><span class="memo-value">Personalized Wealth Protection &amp; FIRE Strategy — Target Age ${formData.targetRetirementAge}</span></div>
+    </div>
+
+    <!-- Six-Tile Summary -->
+    <div class="tile-grid">
+      <div class="tile">
+        <div class="tile-label">Monthly Need (Future)</div>
+        <div class="tile-value">&euro;${futureMonthlyNeed.toLocaleString()}</div>
+        <div class="tile-sub">&euro;${formData.desiredMonthlyIncome.toLocaleString()} today</div>
+      </div>
+      <div class="tile">
+        <div class="tile-label">Target Nest Egg</div>
+        <div class="tile-value">&euro;${metrics.targetNestEgg.toLocaleString()}</div>
+        <div class="tile-sub">at 4% SWR</div>
+      </div>
+      <div class="tile">
+        <div class="tile-label">Gap to Fill</div>
+        <div class="tile-value">&euro;${metrics.gapToFill.toLocaleString()}</div>
+        <div class="tile-sub">wealth shortfall</div>
+      </div>
+      <div class="tile">
+        <div class="tile-label">Monthly Savings Target</div>
+        <div class="tile-value">&euro;${metrics.monthlySavingsTarget.toLocaleString()}</div>
+        <div class="tile-sub">to reach FIRE</div>
+      </div>
+      <div class="tile">
+        <div class="tile-label">Asset Allocation</div>
+        <div class="tile-value allocation">${allocation.stocks}% / ${allocation.bonds}% / ${allocation.realEstate}% / ${allocation.cash}%</div>
+        <div class="tile-sub">Stocks / Bonds / RE / Cash</div>
+      </div>
+      <div class="tile">
+        <div class="tile-label">Current Net Wealth</div>
+        <div class="tile-value">&euro;${netWealth.toLocaleString()}</div>
+        <div class="tile-sub">total assets − liabilities</div>
+      </div>
+    </div>
+
+    <!-- Status Indicators -->
+    <div class="status-bar">
+      ${isWealthLeaking
+        ? '<div class="status-pill leak"><span class="status-dot leak"></span>Wealth Leak Alert — &euro;' + taxLeakAnnual.toLocaleString() + '/yr in Box 3 tax drag</div>'
+        : '<div class="status-pill ok"><span class="status-dot ok"></span>Low Tax Exposure — Box 3 drag within threshold</div>'
+      }
+      ${isAchievable
+        ? '<div class="status-pill ok"><span class="status-dot ok"></span>Path to Freedom ✓ Target is achievable</div>'
+        : '<div class="status-pill leak"><span class="status-dot leak"></span>Significant Gap — Strategy optimization critical</div>'
+      }
+    </div>
+  </div>
+</div>
+
+<!-- ============ PILLAR 1: AOW ============ -->
+<div class="page-break"></div>
+<div class="container" style="padding-top: 48px;">
+  <h2>Pillar 1 — AOW &amp; State Pension: The Safety Floor</h2>
+  <p>Your baseline state pension security, accrued at 2% per year of NL residency.</p>
+
+  <div class="data-card">
+    <div class="data-card-title">AOW Accrual Timeline (50-Year Horizon)</div>
+    <div class="timeline-bar">
+      <div class="timeline-filled" style="width: ${aowPct}%">${yearsInNL} yrs in NL</div>
+      ${formData.yearsAbroad > 0 ? '<div class="timeline-gap" style="width: ' + (100 - aowPct) + '%">' + formData.yearsAbroad + ' yrs gap</div>' : ''}
+    </div>
+    <p style="font-size: 11px; color: #64748b;">Accrual: <strong>${aowPct}%</strong> of full AOW benefit. ${formData.yearsAbroad > 0 ? 'Gap of ' + formData.yearsAbroad + ' years abroad reduces your entitlement.' : ''}</p>
+  </div>
+
+  <div class="data-card">
+    <div class="data-card-title">Projected Monthly AOW at Age 67</div>
+    <div class="big-number">&euro;${aowMonthly.toLocaleString()}/mo</div>
+    <p style="font-size: 12px; color: #64748b; margin-top: 6px;">${aowPct < 100 ? 'Shortfall: <strong style="color:#fbbf24;">€' + aowShortfall + '/mo</strong> vs full AOW (€1,637).' : 'Full AOW benefit secured.'}</p>
+    ${aowPct >= 100 ? '<div class="verified-seal">✓ 100% Accrual Verified</div>' : '<div class="badge-row"><span class="badge amber">⚠ ' + (100 - aowPct) + '% Accrual Gap</span></div>'}
+  </div>
+</div>
+
+<!-- ============ PILLAR 2: Employer Pension ============ -->
+<div class="container" style="padding-top: 16px;">
+  <div class="section-divider"></div>
+  <h2>Pillar 2 — Employer Pension: The Growth Engine</h2>
+  <p>Your workplace pension performance review.</p>
+
+  <div class="data-card">
+    <div class="data-card-title">Annual Accrual (Factor A)</div>
+    <div class="big-number${formData.factorA === 0 ? ' warning' : ''}">&euro;${formData.factorA.toLocaleString()}</div>
+    <div class="badge-row" style="margin-top: 10px;">
+      ${formData.factorA === 0
+        ? '<span class="badge red">✗ Missed Opportunity — No Employer Accrual</span><span class="badge green">✓ Unlocked: Full Pillar 3 Room</span>'
+        : '<span class="badge green">✓ Active Employer Pension</span>'
+      }
+    </div>
+  </div>
+
+  <div class="data-card">
+    <div class="data-card-title">Pillar 2 Coverage of Monthly Need</div>
+    <div class="gauge-row">
+      <div class="gauge-track"><div class="gauge-fill" style="width: ${p2Coverage}%"></div></div>
+      <div class="gauge-label">${p2Coverage}%</div>
+    </div>
+    <p style="font-size: 12px; color: #64748b;">Built-up: <strong>&euro;${formData.builtUpPension.toLocaleString()}/yr</strong> (&euro;${p2Monthly.toLocaleString()}/mo) covers ${p2Coverage}% of your &euro;${formData.desiredMonthlyIncome.toLocaleString()}/mo target.</p>
+  </div>
+</div>
+
+<!-- ============ PILLAR 3: Tax Shield ============ -->
+<div class="page-break"></div>
+<div class="container" style="padding-top: 48px;">
+  <h2>Pillar 3 — Private Savings: The Tax Shield</h2>
+  <p>Your most powerful tool for reducing tax exposure and building tax-sheltered wealth.</p>
+
+  <div class="data-card" style="border-color: #10b981; border-width: 2px;">
+    <div class="data-card-title" style="color: #10b981;">Immediate Tax Refund Potential</div>
+    <div class="big-number">&euro;${p3RefundLow.toLocaleString()} — &euro;${p3RefundHigh.toLocaleString()}</div>
+    <p style="font-size: 12px; color: #94a3b8; margin-top: 6px;">By filling <strong>&euro;${p3Room.toLocaleString()}</strong> of Jaarruimte + Reserveringsruimte this year.</p>
+    <div class="badge-row"><span class="badge green">Claim 37–49.5% back</span><span class="badge blue">Box 3 → Tax-Exempt</span></div>
+  </div>
+
+  <div class="data-card">
+    <div class="data-card-title">Box 3 Transformation Map</div>
+    <div class="comparison-row">
+      <div class="comparison-box before">
+        <div class="cb-label">Before — Taxable Box 3</div>
+        <div class="cb-value">&euro;${totalBox3.toLocaleString()}</div>
+        <div class="cb-desc">Exposed to 36% fictional/actual returns tax</div>
+      </div>
+      <div class="comparison-box after">
+        <div class="cb-label">After — Optimized</div>
+        <div class="cb-value">&euro;${Math.max(0, totalBox3 - p3Room - (formData.hasSpouse ? 114000 : 57000)).toLocaleString()}</div>
+        <div class="cb-desc">Below &euro;${formData.hasSpouse ? '114k' : '57k'} exemption + Pillar 3 shield</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ REAL ESTATE & FAMILY ============ -->
+<div class="container" style="padding-top: 16px;">
+  <div class="section-divider"></div>
+  <h2>Real Estate &amp; Family Wealth: The Structural Shelter</h2>
+
+  ${formData.propertyValue > 0 ? '<div class="data-card"><div class="data-card-title">Bigger House Strategy</div><div class="comparison-row"><div class="comparison-box before"><div class="cb-label">Current Setup</div><div class="cb-value">&euro;' + fictitiousTax.toLocaleString() + '/yr</div><div class="cb-desc">Box 3 tax on excess assets</div></div><div class="comparison-box after"><div class="cb-label">After Upgrade</div><div class="cb-value">Reduced</div><div class="cb-desc">Mortgage shifts wealth to Box 1 (exempt)</div></div></div><p style="font-size: 12px; color: #64748b;">HRA deduction: <strong>37.56%</strong> in 2026. Eigenwoningforfait: <strong>&euro;' + Math.round(formData.propertyValue * 0.0035).toLocaleString() + '/yr</strong> (0.35% of WOZ).</p></div>' : ''}
+
+  ${formData.hasChildren ? '<div class="data-card"><div class="data-card-title">Family Wealth Flow — Gifting Strategy</div><p style="font-size: 12px; color: #cbd5e1;">Tax-free gifting 2026: <strong>&euro;6,908/child/year</strong> (&euro;13,816 from partners).<br>One-time enlarged: <strong>&euro;33,129</strong> per child (age 18–40).<br>"Schenken op papier": Keep capital, owe child 6% interest — deductible as Box 3 debt.</p><div class="badge-row"><span class="badge green">Annual shift: &euro;' + (formData.childrenCount * 6908).toLocaleString() + '</span><span class="badge blue">' + formData.childrenCount + ' child' + (formData.childrenCount > 1 ? 'ren' : '') + '</span></div></div>' : ''}
+</div>
+
+<!-- ============ GEO-ARBITRAGE ============ -->
+<div class="page-break"></div>
+<div class="container" style="padding-top: 48px;">
+  <h2>Global Retirement: The Geo-Arbitrage Catalog</h2>
+  <p>Countries with the most favourable tax treaties for Dutch residents retiring abroad.</p>
+
+  <div class="country-grid">
+    ${countries.map(c => '<div class="country-card"><div class="cc-name">' + c.flag + ' ' + c.name + '</div><div class="cc-tax">' + c.tax + '</div><div class="cc-benefit">' + c.benefit + '</div></div>').join('')}
+  </div>
+</div>
+
+<!-- ============ BRIDGE PHASE ============ -->
+<div class="container" style="padding-top: 16px;">
+  <div class="section-divider"></div>
+  <h2>Bridge Phase Strategy: Age ${formData.targetRetirementAge} → 67</h2>
+  <p>${Math.round(bridgeYrs)} years of self-funded retirement before full AOW kicks in. Total cost: <strong>&euro;${bridgeCost.toLocaleString()}</strong>.</p>
+
+  <div class="data-card">
+    <div class="data-card-title">Bridge Phase Funding Timeline</div>
+    <div class="gantt-bar-container">
+      <div class="gantt-row">
+        <span class="gantt-label">Box 3 Savings</span>
+        <div class="gantt-track"><div class="gantt-fill savings" style="width: ${Math.min(100, Math.round(bridgeYrs * 30))}%">Years 1–${Math.min(Math.round(bridgeYrs * 0.4), Math.round(bridgeYrs))}</div></div>
+      </div>
+      <div class="gantt-row">
+        <span class="gantt-label">Lijfrente (P3)</span>
+        <div class="gantt-track"><div class="gantt-fill lijfrente" style="width: ${Math.min(100, Math.round(bridgeYrs * 25))}%">Tax-efficient draw</div></div>
+      </div>
+      <div class="gantt-row">
+        <span class="gantt-label">Pillar 2</span>
+        <div class="gantt-track"><div class="gantt-fill p2" style="width: ${Math.min(100, Math.round(bridgeYrs * 20))}%">Workplace pension</div></div>
+      </div>
+      <div class="gantt-row">
+        <span class="gantt-label">AOW (67+)</span>
+        <div class="gantt-track"><div class="gantt-fill aow" style="width: 100%">Full state pension from age 67</div></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ============ AI ANALYSIS (all 8 sections) ============ -->
+<div class="page-break"></div>
+<div class="container" style="padding-top: 48px;">
+  <h2>Detailed Wealth Architect Analysis</h2>
+  <p style="color: #64748b; font-style: italic; margin-bottom: 24px;">The following is your personalized, AI-powered analysis covering all pillars of Dutch wealth strategy.</p>
+  ${contentHtml}
+</div>
+
+<!-- ============ DISCLAIMER & FOOTER ============ -->
+<div class="container" style="padding-bottom: 60px;">
+  <div class="disclaimer">
+    <strong>Disclaimer:</strong> This report is generated by AI based on the information you provided and current Dutch tax law as of 2026.
+    It does not constitute personal financial or tax advice. Always consult a qualified Dutch tax advisor (belastingadviseur)
+    or financial planner (financieel planner) before making financial decisions. Tax laws, rates, and thresholds may change.
+    ProsperPath is not liable for any actions taken based on this report.
+  </div>
+
+  <div class="report-footer">
+    <span class="brand">ProsperPath</span> &bull; AI-Powered Dutch Wealth Strategy &bull; ${dateStr}<br>
+    This is a personalized report. Do not share publicly.
+  </div>
+</div>
+
+</body>
+</html>`;
+
+    // Open in new window for printing as PDF
+    const printWindow = window.open('', '_blank');
+    if (printWindow) {
+      printWindow.document.write(htmlContent);
+      printWindow.document.close();
+      // Auto-trigger print dialog (Save as PDF)
+      setTimeout(() => {
+        printWindow.print();
+      }, 500);
+    } else {
+      // Fallback: download as HTML file if popup blocked
+      const blob = new Blob([htmlContent], { type: 'text/html' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'VrijWealth-Wealth-Strategy.html';
+      a.click();
+      URL.revokeObjectURL(url);
+    }
+  };
+
   // Loading messages to keep users engaged
   const loadingMessages = [
     "Scanning 2026 Dutch Tax Law... Every day you wait is a day of missed compounding.",
@@ -98,8 +797,8 @@ export default function App() {
     return () => clearInterval(interval);
   }, [isSubmitting, loadingMessages.length]);
   
-  // Form data with detailed financial breakdown
-  const [formData, setFormData] = useState({
+  // Default form data (used for initialization and reset)
+  const defaultFormData = {
     // Household
     fullName: '',
     age: 30,
@@ -159,7 +858,10 @@ export default function App() {
     targetRetirementAge: 55,
     desiredMonthlyIncome: 3000,
     lifeExpectancy: 90
-  });
+  };
+
+  // Form data with detailed financial breakdown
+  const [formData, setFormData] = useState({ ...defaultFormData });
 
   const t = translations[language];
 
@@ -304,6 +1006,11 @@ export default function App() {
     setFormData(prev => ({ ...prev, [field]: value }));
   };
 
+  // Auto-select input content on focus (fixes mobile UX — no need to delete "0" first)
+  const handleInputFocus = (e) => {
+    e.target.select();
+  };
+
   // Sync detailed financial data from form to state variables
   const syncDetailedFinancials = () => {
     setSavingsBalance(formData.savingsBalance || 0);
@@ -407,6 +1114,7 @@ export default function App() {
   };
 
   const handleGetStarted = () => {
+    setFormData({ ...defaultFormData });
     setShowQuestionnaire(true);
     setCurrentStep('household');
     setValidationErrors({});
@@ -466,6 +1174,11 @@ export default function App() {
     const p3Room = formData.jaarruimte + formData.reserveringsruimte;
     const equity = formData.propertyValue - formData.mortgageBalance;
     const aowShortfall = Math.round((1 - aowPct / 100) * 1637);
+    const basicAge = parseInt(formData.age) || 30;
+    const basicYearsToFire = Math.max(0, formData.targetRetirementAge - basicAge);
+    const basicInflationMultiplier = Math.pow(1.022, basicYearsToFire);
+    const basicFutureMonthlyNeed = Math.round(formData.desiredMonthlyIncome * basicInflationMultiplier);
+    const futureBridgeCostBasic = Math.round(bridgeYrs * 12 * basicFutureMonthlyNeed);
 
     const prompt = `Dutch FIRE & Tax Architect. Analyze profile, find Wealth Leakage, provide 2026-optimized early retirement roadmap.
 
@@ -475,7 +1188,13 @@ PROFILE: Age ${formData.age} | FIRE ${formData.targetRetirementAge} | Need €${
 ASSETS: Bank €${formData.savingsBalance} (int €${formData.interestEarned}) | Crypto Jan€${formData.cryptoValueJan1}→Dec€${formData.cryptoValueDec31} | Div €${formData.dividendsReceived} | DebtInt €${formData.debtInterest}
 PROPERTY: WOZ €${formData.propertyValue} Mortgage €${formData.mortgageBalance}@${formData.mortgageInterestRate}% ${formData.mortgageYearsLeft}yr | Equity €${equity}${formData.targetPropertyValue > 0 ? ` | Upgrade €${formData.targetPropertyValue}` : ''} | Rental €${formData.rentalIncome} Sale €${formData.saleProceeds} Cost €${formData.purchasePrice} | Loss €${formData.priorYearLoss}
 PENSION: P1 AOW ${aowPct}% (abroad ${formData.yearsAbroad}yr, gap €${aowShortfall}/mo)${formData.hasSpouse ? ` Spouse ${Math.max(0, Math.min(100, (50 - formData.spouseYearsAbroad) * 2))}%` : ''} | P2 €${formData.builtUpPension}/yr FactorA €${formData.factorA}${formData.hasSpouse ? ` Sp €${formData.spouseBuiltUpPension}/yr FA €${formData.spouseFactorA}` : ''} | P3 Jaar €${formData.jaarruimte} Res €${formData.reserveringsruimte}${formData.hasSpouse ? ` Sp J€${formData.spouseJaarruimte} R€${formData.spouseReserveringsruimte}` : ''}
-RETIRE: Bridge ${Math.round(bridgeYrs)}yr = €${bridgeCost.toLocaleString()} self-funded | Wealth €${netWealth.toLocaleString()} | SWR need €${Math.round(formData.desiredMonthlyIncome * 12 / 0.04).toLocaleString()}@4%
+RETIRE: Bridge ${Math.round(bridgeYrs)}yr = €${futureBridgeCostBasic.toLocaleString()} self-funded (inflation-adj) | Wealth €${netWealth.toLocaleString()} | SWR need €${Math.round(basicFutureMonthlyNeed * 12 / 0.04).toLocaleString()}@4%
+
+INFLATION (CRITICAL — apply throughout):
+- NL Inflation: 2.2%/yr. Years to FIRE: ${basicYearsToFire}.
+- Today's Need: €${formData.desiredMonthlyIncome}/mo → At FIRE: €${basicFutureMonthlyNeed}/mo (×(1.022)^${basicYearsToFire}).
+- Real Return = Nominal − 2.2% for all growth projections (keep values in Today's Euro).
+- All € amounts MUST be inflation-adjusted. Show both today's and future euros.
 
 TASKS: (1) Bridge cost age ${formData.targetRetirementAge}→67 (2) AOW gap from ${formData.yearsAbroad}yr abroad (3) 2028 stress test on crypto/stocks (4) Box 3 tax drag (5) House-as-shield from €${equity} equity (6) SWR over ${formData.lifeExpectancy - formData.targetRetirementAge}yr
 
@@ -495,7 +1214,7 @@ PROJECTED_AT_RETIREMENT: [number]
 ACTION_STEP_1_TITLE: Bridge Phase Strategy
 ACTION_STEP_1_PRIORITY: Critical
 ACTION_STEP_1_TAG: Retirement
-ACTION_STEP_1_DESC: Need €${bridgeCost.toLocaleString()} for ${Math.round(bridgeYrs)} bridge years at €${formData.desiredMonthlyIncome}/mo before AOW. Recommend specific fund/approach.
+ACTION_STEP_1_DESC: Need €${futureBridgeCostBasic.toLocaleString()} (inflation-adjusted) for ${Math.round(bridgeYrs)} bridge years at €${basicFutureMonthlyNeed}/mo before AOW. Recommend specific fund/approach.
 
 ACTION_STEP_2_TITLE: Maximize Pillar 3
 ACTION_STEP_2_PRIORITY: High Priority
@@ -515,7 +1234,7 @@ ACTION_STEP_4_DESC: Tegenbewijsregeling if real gains <6%. Restructure before re
 ACTION_STEP_5_TITLE: Safe Withdrawal Plan
 ACTION_STEP_5_PRIORITY: High Priority
 ACTION_STEP_5_TAG: Retirement
-ACTION_STEP_5_DESC: €${formData.desiredMonthlyIncome}/mo over ${formData.lifeExpectancy - formData.targetRetirementAge}yr. Adjust SWR for Dutch tax/inflation.
+ACTION_STEP_5_DESC: €${basicFutureMonthlyNeed}/mo (inflation-adjusted from €${formData.desiredMonthlyIncome} today) over ${formData.lifeExpectancy - formData.targetRetirementAge}yr. Adjust SWR for Dutch tax/inflation using real returns.
 
 ---DUTCH_TAX---
 BOX3_STRATEGY: Savings vs Assets split. Box 3 total €${formData.savingsBalance + formData.cryptoValueDec31}. Optimize before 2028.
@@ -531,7 +1250,9 @@ PRODUCT_2_TYPE: Fund
 PRODUCT_2_DESC: Box 3 friendly via fiscal transparency.
 ---
 
-STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetirementAge}→AOW, Box 3 optimization pre-2028, Pillar 3 maximization, AOW gap, SWR sustainability. Actionable € amounts.`;
+STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetirementAge}→AOW (€${futureBridgeCostBasic.toLocaleString()} inflation-adjusted), Box 3 optimization pre-2028, Pillar 3 maximization, AOW gap, SWR sustainability using real returns (nominal − 2.2%). Actionable € amounts in today's euros.
+
+IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start directly with the structured output (MONTHLY_NEED, TARGET_NEST_EGG, etc.) followed by the action steps and strategy sections. Do not introduce yourself or explain what you are doing.`;
 
     setIsSubmitting(true);
     setLoadingMessageIndex(0);
@@ -883,9 +1604,906 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
     setCurrentStep('household');
   };
 
+  // Payment Modal (rendered across all pages)
+  const paymentModal = showPaymentModal ? (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+      {/* Backdrop */}
+      <div 
+        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        onClick={() => !paymentProcessing && setShowPaymentModal(false)}
+      ></div>
+      
+      {/* Modal */}
+      <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden">
+        {/* Header */}
+        <div className="bg-gradient-to-r from-slate-900 to-slate-800 px-6 py-5">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <div className="w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center">
+                <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+              </div>
+              <div>
+                <h3 className="text-white font-bold text-lg">VrijWealth</h3>
+                <p className="text-slate-400 text-xs">Secure checkout</p>
+              </div>
+            </div>
+            {!paymentProcessing && (
+              <button 
+                onClick={() => setShowPaymentModal(false)}
+                className="text-slate-400 hover:text-white transition-colors"
+              >
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M6 18L18 6M6 6l12 12" />
+                </svg>
+              </button>
+            )}
+          </div>
+        </div>
+
+        {paymentSuccess ? (
+          /* Success State */
+          <div className="px-6 py-8 text-center">
+            {pdfGenerating ? (
+              /* PDF Generation in Progress */
+              <>
+                <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="animate-spin w-8 h-8 text-blue-600" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                </div>
+                <h3 className="text-slate-900 text-xl font-bold mb-2">Generating Your Premium Report...</h3>
+                <p className="text-slate-500 text-sm mb-4">Our AI is creating your personalized 8-section wealth strategy with Dutch tax optimization, geo-arbitrage analysis, and retirement simulation.</p>
+                <div className="space-y-2 text-left max-w-xs mx-auto">
+                  {['Wealth Shield & 2028 Prep', 'Pension Audit (Pillar 1-3)', 'Real Estate Optimization', 'Family Wealth Transfer', 'Global Retirement (10 countries)', 'Bridge Phase Strategy', 'Final Verdict & Simulation'].map((item, i) => (
+                    <div key={i} className="flex items-center gap-2 text-xs text-slate-500">
+                      <svg className="animate-pulse w-3 h-3 text-emerald-500" fill="currentColor" viewBox="0 0 8 8">
+                        <circle cx="4" cy="4" r="4" />
+                      </svg>
+                      {item}
+                    </div>
+                  ))}
+                </div>
+              </>
+            ) : (
+              /* PDF Ready */
+              <>
+                <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                  <svg className="w-8 h-8 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
+                  </svg>
+                </div>
+                <h3 className="text-slate-900 text-xl font-bold mb-2">
+                  {pdfReady ? 'Your Premium Report is Ready!' : 'Payment Successful!'}
+                </h3>
+                <p className="text-slate-500 text-sm mb-5">
+                  {pdfReady 
+                    ? '8-section wealth strategy with Dutch tax optimization. Click below to view and save as PDF.'
+                    : 'Your personalized wealth strategy is ready for download.'
+                  }
+                </p>
+
+                {/* Disclaimer Checkbox */}
+                <label className={`flex items-start gap-3 p-3 rounded-lg border mb-4 cursor-pointer transition-colors ${
+                  disclaimerAccepted 
+                    ? 'bg-emerald-50 border-emerald-300' 
+                    : 'bg-slate-50 border-slate-200 hover:border-slate-300'
+                }`}>
+                  <input
+                    type="checkbox"
+                    checked={disclaimerAccepted}
+                    onChange={(e) => setDisclaimerAccepted(e.target.checked)}
+                    className="mt-0.5 w-4 h-4 text-emerald-600 border-slate-300 rounded focus:ring-emerald-500 flex-shrink-0"
+                  />
+                  <span className="text-slate-600 text-xs leading-relaxed">
+                    I understand that this is an AI-generated strategy for educational purposes and I will verify key actions with a qualified professional.
+                  </span>
+                </label>
+                
+                <button
+                  onClick={handleDownloadPDF}
+                  disabled={!disclaimerAccepted}
+                  className={`w-full font-bold py-4 rounded-xl transition-colors flex items-center justify-center gap-2 text-lg ${
+                    disclaimerAccepted
+                      ? 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
+                      : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                  }`}
+                >
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                  </svg>
+                  Download PDF Strategy
+                </button>
+                
+                <button
+                  onClick={() => setShowPaymentModal(false)}
+                  className="mt-3 text-slate-400 hover:text-slate-600 text-sm transition-colors"
+                >
+                  Close
+                </button>
+              </>
+            )}
+          </div>
+        ) : (
+          /* Payment Form */
+          <div className="px-6 py-6">
+            {/* Order Summary */}
+            <div className="bg-slate-50 rounded-xl p-4 mb-6">
+              <div className="flex items-center justify-between mb-2">
+                <span className="text-slate-700 font-medium text-sm">AI Wealth Strategy PDF</span>
+                <span className="text-slate-400 line-through text-sm">€99</span>
+              </div>
+              <div className="flex items-center justify-between">
+                <span className="text-emerald-600 text-xs font-medium">Launch discount (80% off)</span>
+                <span className="text-slate-900 font-bold text-xl">€19.99</span>
+              </div>
+            </div>
+
+            {/* Mock Card Form */}
+            <div className="space-y-4 mb-6">
+              <div>
+                <label className="block text-slate-600 text-xs font-medium mb-1.5">Email</label>
+                <input 
+                  type="email" 
+                  placeholder="you@example.com"
+                  className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none"
+                />
+              </div>
+              <div>
+                <label className="block text-slate-600 text-xs font-medium mb-1.5">Card number</label>
+                <div className="relative">
+                  <input 
+                    type="text" 
+                    placeholder="4242 4242 4242 4242"
+                    className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none pr-16"
+                  />
+                  <div className="absolute right-3 top-1/2 -translate-y-1/2 flex items-center gap-1">
+                    <div className="w-8 h-5 bg-blue-600 rounded text-white text-[6px] font-bold flex items-center justify-center">VISA</div>
+                    <div className="w-8 h-5 bg-red-500 rounded text-white text-[6px] font-bold flex items-center justify-center">MC</div>
+                  </div>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-600 text-xs font-medium mb-1.5">Expiry</label>
+                  <input 
+                    type="text" 
+                    placeholder="MM / YY"
+                    className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-600 text-xs font-medium mb-1.5">CVC</label>
+                  <input 
+                    type="text" 
+                    placeholder="123"
+                    className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none"
+                  />
+                </div>
+              </div>
+            </div>
+
+            {/* Pay Button */}
+            <button
+              onClick={handleMockPayment}
+              disabled={paymentProcessing}
+              className="w-full bg-emerald-600 hover:bg-emerald-700 disabled:bg-emerald-400 text-white font-bold py-4 rounded-xl transition-colors flex items-center justify-center gap-2 text-lg"
+            >
+              {paymentProcessing ? (
+                <>
+                  <svg className="animate-spin w-5 h-5" viewBox="0 0 24 24" fill="none">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                  </svg>
+                  Processing...
+                </>
+              ) : (
+                <>
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                  </svg>
+                  Pay €19.99
+                </>
+              )}
+            </button>
+
+            {/* Trust Badges */}
+            <div className="flex items-center justify-center gap-4 mt-4 text-slate-400 text-xs">
+              <div className="flex items-center gap-1">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
+                </svg>
+                SSL Encrypted
+              </div>
+              <div className="flex items-center gap-1">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
+                </svg>
+                Powered by Stripe
+              </div>
+              <div className="flex items-center gap-1">
+                <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
+                </svg>
+                Secure Payment
+              </div>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  ) : null;
+
+  // ===== Disclaimer Page =====
+  if (showDisclaimer) {
+    return (
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white">
+        {paymentModal}
+        {/* Header */}
+        <div className="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-md border-b border-slate-800">
+          <div className="max-w-5xl mx-auto px-4 sm:px-6 py-4 flex items-center justify-between">
+            <button
+              onClick={() => setShowDisclaimer(false)}
+              className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+              <span className="text-sm font-medium">Back to Home</span>
+            </button>
+            <span className="text-sm text-slate-500 font-medium tracking-wider uppercase">VrijWealth</span>
+          </div>
+        </div>
+
+        {/* Content */}
+        <div className="max-w-4xl mx-auto px-4 sm:px-6 py-12">
+          {/* Title Section */}
+          <div className="text-center mb-12">
+            <div className="inline-flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 rounded-full px-4 py-1.5 mb-6">
+              <svg className="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+              <span className="text-xs font-semibold text-amber-400 tracking-wider uppercase">Legal Notice</span>
+            </div>
+            <h1 className="text-3xl sm:text-4xl font-bold bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent mb-4">
+              Disclaimer & Important Information
+            </h1>
+            <p className="text-slate-400 max-w-2xl mx-auto">
+              Please read the following information carefully before using VrijWealth services.
+            </p>
+          </div>
+
+          {/* Disclaimer Sections */}
+          <div className="space-y-6">
+            {/* Section 1: Nature of Service */}
+            <div className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6 sm:p-8">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-10 h-10 bg-blue-500/10 border border-blue-500/20 rounded-xl flex items-center justify-center">
+                  <span className="text-blue-400 font-bold text-lg">1</span>
+                </div>
+                <div>
+                  <h2 className="text-xl font-semibold text-white mb-3">Nature of Service</h2>
+                  <p className="text-slate-300 leading-relaxed">
+                    VrijAI is an AI-powered informational tool developed by Vrij Wealth. It is designed to provide general financial insights and educational content only. VrijAI does not provide personalised financial advice, investment recommendations, or tax planning services.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 2: Not Financial Advice */}
+            <div className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6 sm:p-8">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-10 h-10 bg-emerald-500/10 border border-emerald-500/20 rounded-xl flex items-center justify-center">
+                  <span className="text-emerald-400 font-bold text-lg">2</span>
+                </div>
+                <div>
+                  <h2 className="text-xl font-semibold text-white mb-3">Not Financial Advice</h2>
+                  <p className="text-slate-300 leading-relaxed">
+                    The outputs generated by VrijAI — including projections, scenarios, tax estimates, and commentary — are for informational and illustrative purposes only. They do not constitute financial advice, legal advice, tax advice, or any form of regulated advisory service under Dutch or EU financial regulations (including MiFID II and the Wet op het financieel toezicht, "Wft").
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 3: Accuracy & Risk */}
+            <div className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6 sm:p-8">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-10 h-10 bg-amber-500/10 border border-amber-500/20 rounded-xl flex items-center justify-center">
+                  <span className="text-amber-400 font-bold text-lg">3</span>
+                </div>
+                <div>
+                  <h2 className="text-xl font-semibold text-white mb-3">Accuracy & Risk</h2>
+                  <p className="text-slate-300 leading-relaxed">
+                    While we strive to maintain accurate and up-to-date models, VrijAI may produce outputs that are incomplete, outdated, or incorrect. AI-generated content should never be used as the sole basis for any financial, investment, or tax-related decision. All financial decisions involve risk, including the risk of loss. Past performance or projected outcomes are not indicative of future results.
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* Section 4: Mandatory Verification */}
+            <div className="bg-slate-800/40 border border-slate-700/50 rounded-2xl p-6 sm:p-8">
+              <div className="flex items-start gap-4">
+                <div className="flex-shrink-0 w-10 h-10 bg-purple-500/10 border border-purple-500/20 rounded-xl flex items-center justify-center">
+                  <span className="text-purple-400 font-bold text-lg">4</span>
+                </div>
+                <div>
+                  <h2 className="text-xl font-semibold text-white mb-3">Mandatory Verification</h2>
+                  <p className="text-slate-300 leading-relaxed">
+                    Users are strongly encouraged to consult a licensed financial adviser, tax professional, or legal expert before acting on any information provided by VrijAI. By using this tool, you acknowledge and accept that Vrij Wealth and its affiliates bear no liability for decisions made based on VrijAI outputs.
+                  </p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* Footer Note */}
+          <div className="mt-10 text-center">
+            <div className="inline-flex items-center gap-2 bg-slate-800/60 border border-slate-700/40 rounded-full px-5 py-2.5">
+              <svg className="w-4 h-4 text-slate-500" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
+              <span className="text-xs text-slate-400">
+                © {new Date().getFullYear()} Vrij Wealth. All rights reserved.
+              </span>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ===== Box 3 Detailed Comparison Page =====
+  if (showBox3Comparison) {
+    const portfolioProfiles = {
+      conservative: { label: 'Conservative', emoji: '🛡', nominal: 0.05, color: 'red' },
+      balanced: { label: 'Balanced', emoji: '⚖️', nominal: 0.07, color: 'orange' },
+      growth: { label: 'Growth', emoji: '📈', nominal: 0.09, color: 'indigo' },
+      aggressive: { label: 'Aggressive', emoji: '🚀', nominal: 0.12, color: 'purple' },
+    };
+    const profile = portfolioProfiles[box3PortfolioType];
+    const nominalReturn = profile.nominal;
+    const inflRate = 0.022;
+    const realReturn = nominalReturn - inflRate;
+    const currentAge = parseInt(formData.age) || 25;
+    const fireAge = box3FireAge;
+    const lifeExp = box3LifeExpectancy;
+    const annualSavings = box3MonthlySavings * 12;
+    const startCap = box3StartingCapital;
+    const annualWithdraw = box3AnnualWithdrawal;
+    const box3Exempt = formData.hasSpouse ? 114000 : 57000;
+
+    // Run simulation for both tax regimes
+    const runSim = (regime) => {
+      const data = [];
+      let balance = startCap;
+      let totalInvested = startCap;
+      let totalTax = 0;
+      let totalWithdrawn = 0;
+      let totalGains = 0;
+      let fireReached = false;
+      let fireAgeResult = null;
+      const targetPortfolio = annualWithdraw / 0.05; // 5% withdrawal rate
+
+      for (let age = currentAge; age <= lifeExp; age++) {
+        const isAccumulating = age < fireAge;
+        const yearGain = balance * nominalReturn;
+        totalGains += Math.max(0, yearGain);
+
+        // Tax calculation
+        let yearTax = 0;
+        if (regime === '2026') {
+          // Fictitious returns: savings 1.44%, investments 6%
+          const taxableBase = Math.max(0, balance - box3Exempt);
+          const fictitiousReturn = taxableBase * 0.06;
+          yearTax = Math.max(0, fictitiousReturn * 0.36);
+        } else {
+          // 2028 actual returns: 36% on real gains
+          yearTax = Math.max(0, yearGain * 0.36);
+        }
+        totalTax += yearTax;
+
+        if (isAccumulating) {
+          balance = balance + yearGain - yearTax + annualSavings;
+          totalInvested += annualSavings;
+        } else {
+          const withdraw = Math.min(annualWithdraw, balance);
+          balance = balance + yearGain - yearTax - withdraw;
+          totalWithdrawn += withdraw;
+        }
+
+        if (!fireReached && balance >= targetPortfolio && isAccumulating) {
+          fireReached = true;
+          fireAgeResult = age;
+        }
+
+        data.push({
+          age,
+          balance: Math.max(0, balance),
+          invested: totalInvested,
+          gains: totalGains,
+          tax: totalTax,
+          withdrawn: totalWithdrawn,
+          isAccumulating,
+        });
+      }
+
+      // If fire never reached during accumulation, find when target is first hit
+      if (!fireAgeResult) {
+        fireAgeResult = fireAge; // default to user target
+      }
+
+      return { data, totalTax, totalGains, fireAge: fireAgeResult, totalInvested, totalWithdrawn };
+    };
+
+    const sim2026 = runSim('2026');
+    const sim2028 = runSim('2028');
+    const fireDelay = sim2028.fireAge - sim2026.fireAge;
+    const additionalInvestment = Math.round((fireDelay * annualSavings) / 1000);
+    const taxDiff = sim2028.totalTax - sim2026.totalTax;
+    const maxBalance2026 = Math.max(...sim2026.data.map(d => d.balance));
+    const maxBalance2028 = Math.max(...sim2028.data.map(d => d.balance));
+
+    // Compute annual withdrawal at FIRE (inflation-adjusted)
+    const yearsToFire2026 = sim2026.fireAge - currentAge;
+    const yearsToFire2028 = sim2028.fireAge - currentAge;
+    const withdrawAtFire2026 = Math.round(annualWithdraw * Math.pow(1 + inflRate, yearsToFire2026));
+    const withdrawAtFire2028 = Math.round(annualWithdraw * Math.pow(1 + inflRate, yearsToFire2028));
+
+    // Simple bar chart renderer (SVG)
+    const renderChart = (simData, maxVal, label) => {
+      const chartW = 700;
+      const chartH = 250;
+      const padL = 65;
+      const padR = 10;
+      const padT = 15;
+      const padB = 40;
+      const plotW = chartW - padL - padR;
+      const plotH = chartH - padT - padB;
+      const n = simData.data.length;
+      const xStep = plotW / Math.max(n - 1, 1);
+      const yScale = plotH / maxVal;
+      const yTicks = [0, maxVal * 0.25, maxVal * 0.5, maxVal * 0.75, maxVal];
+
+      // Build points for each layer
+      const pts = simData.data.map((d, i) => {
+        const x = padL + i * xStep;
+        const invested = Math.min(d.invested, d.balance);
+        const gains = Math.max(0, d.balance - d.invested);
+        const tax = d.tax * 0.15;
+        return { x, invested, gains, tax, age: d.age, balance: d.balance, isAccumulating: d.isAccumulating };
+      });
+
+      const baseY = chartH - padB;
+
+      // Helper: build a closed area path from top-points
+      const areaPath = (topFn) => {
+        let path = `M ${pts[0].x} ${baseY}`;
+        pts.forEach((p) => { path += ` L ${p.x} ${Math.max(padT, baseY - topFn(p))}` });
+        path += ` L ${pts[pts.length - 1].x} ${baseY} Z`;
+        return path;
+      };
+
+      // Helper: build a line path from top-points
+      const linePath = (topFn) => {
+        let path = `M ${pts[0].x} ${Math.max(padT, baseY - topFn(pts[0]))}`;
+        for (let i = 1; i < pts.length; i++) {
+          path += ` L ${pts[i].x} ${Math.max(padT, baseY - topFn(pts[i]))}`;
+        }
+        return path;
+      };
+
+      const investedTop = (p) => p.invested * yScale;
+      const gainsTop = (p) => (p.invested + p.gains) * yScale;
+      const taxTop = (p) => (p.invested + p.gains + p.tax) * yScale;
+
+      const uid = `chart-${label}-${Date.now()}`;
+
+      // FIRE age x position
+      const fireIdx = simData.data.findIndex(d => d.age === simData.fireAge);
+      const fireX = fireIdx >= 0 ? padL + fireIdx * xStep : null;
+
+      return (
+        <div className="bg-slate-800/40 backdrop-blur-sm rounded-xl p-4 border border-slate-700">
+          <h4 className="text-white font-bold text-sm mb-3">Portfolio Projection</h4>
+          <svg viewBox={`0 0 ${chartW} ${chartH}`} className="w-full" style={{ maxHeight: 300 }}>
+            <defs>
+              <linearGradient id={`${uid}-invested`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#34d399" stopOpacity="0.8" />
+                <stop offset="100%" stopColor="#34d399" stopOpacity="0.15" />
+              </linearGradient>
+              <linearGradient id={`${uid}-gains`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#60a5fa" stopOpacity="0.8" />
+                <stop offset="100%" stopColor="#60a5fa" stopOpacity="0.15" />
+              </linearGradient>
+              <linearGradient id={`${uid}-tax`} x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stopColor="#c084fc" stopOpacity="0.7" />
+                <stop offset="100%" stopColor="#c084fc" stopOpacity="0.1" />
+              </linearGradient>
+            </defs>
+
+            {/* Grid lines */}
+            {yTicks.map((v, i) => (
+              <g key={i}>
+                <text x={padL - 8} y={baseY - v * yScale + 4} fontSize="10" fill="#64748b" textAnchor="end">
+                  {v >= 1000000 ? (v / 1000000).toFixed(1) + 'M' : v >= 1000 ? Math.round(v / 1000) + 'K' : Math.round(v)}
+                </text>
+                <line x1={padL} y1={baseY - v * yScale} x2={chartW - padR} y2={baseY - v * yScale} stroke="#334155" strokeWidth="0.5" />
+              </g>
+            ))}
+
+            {/* Stacked area: Tax (top layer) */}
+            <path d={areaPath(taxTop)} fill={`url(#${uid}-tax)`} />
+            {/* Stacked area: Gains (middle layer) */}
+            <path d={areaPath(gainsTop)} fill={`url(#${uid}-gains)`} />
+            {/* Stacked area: Invested (bottom layer) */}
+            <path d={areaPath(investedTop)} fill={`url(#${uid}-invested)`} />
+
+            {/* Line edges for clarity */}
+            <path d={linePath(taxTop)} fill="none" stroke="#c084fc" strokeWidth="1.5" opacity="0.6" />
+            <path d={linePath(gainsTop)} fill="none" stroke="#60a5fa" strokeWidth="1.5" opacity="0.7" />
+            <path d={linePath(investedTop)} fill="none" stroke="#34d399" strokeWidth="1.5" opacity="0.8" />
+
+            {/* FIRE age vertical line */}
+            {fireX && (
+              <g>
+                <line x1={fireX} y1={padT} x2={fireX} y2={baseY} stroke="#f87171" strokeWidth="1.5" strokeDasharray="6 4" />
+                <text x={fireX} y={padT - 3} fontSize="9" fill="#f87171" textAnchor="middle" fontWeight="bold">FIRE</text>
+              </g>
+            )}
+
+            {/* X-axis labels */}
+            {simData.data.filter((_, i) => i % Math.max(1, Math.floor(n / 10)) === 0).map((d, i) => {
+              const idx = simData.data.indexOf(d);
+              return (
+                <text key={i} x={padL + idx * xStep} y={baseY + 15} fontSize="9" fill="#64748b" textAnchor="middle">
+                  {d.age}
+                </text>
+              );
+            })}
+            <text x={chartW / 2} y={baseY + 30} fontSize="10" fill="#94a3b8" textAnchor="middle">Age</text>
+          </svg>
+          {/* Legend */}
+          <div className="flex flex-wrap gap-4 mt-3 justify-center">
+            {[
+              { color: '#34d399', label: 'Invested' },
+              { color: '#60a5fa', label: 'Gains' },
+              { color: '#c084fc', label: 'Cumulative Tax' },
+            ].map((item, i) => (
+              <div key={i} className="flex items-center gap-1.5 text-xs text-slate-400">
+                <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: item.color, opacity: 0.8 }}></div>
+                {item.label}
+              </div>
+            ))}
+            <div className="flex items-center gap-1.5 text-xs text-slate-400">
+              <div className="w-4 border-t-2 border-dashed border-red-400"></div>
+              FIRE Age
+            </div>
+          </div>
+        </div>
+      );
+    };
+
+    const globalMax = Math.max(maxBalance2026, maxBalance2028) * 1.15;
+
+    return (
+      <>
+      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+        <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+          {/* Back Button */}
+          <button
+            onClick={() => setShowBox3Comparison(false)}
+            className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors mb-6"
+          >
+            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+            </svg>
+            Back to Home
+          </button>
+
+          {/* Header */}
+          <div className="mb-8">
+            <h1 className="text-3xl font-bold text-white mb-2">NL Box 3 Taxes: current vs proposed</h1>
+            <p className="text-slate-400">Compare current NL Box 3 (deemed return) vs proposed 2028 (actual gains) and see impact on total tax and FIRE timeline.</p>
+          </div>
+
+          {/* Your Plan Summary — Editable */}
+          <div className="bg-slate-800/40 backdrop-blur-sm border border-indigo-500/30 rounded-2xl p-6 mb-8">
+            <div className="flex items-center gap-2 mb-4">
+              <span className="text-lg">📋</span>
+              <h3 className="text-lg font-bold text-white">Your plan in this comparison</h3>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
+              <div className="bg-slate-700/40 rounded-xl p-4 border border-slate-600">
+                <label className="block text-slate-400 text-xs font-medium mb-1">Monthly Savings</label>
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400 text-lg">€</span>
+                  <input
+                    type="number" onFocus={handleInputFocus}
+                    min="0" max="50000" step="100"
+                    value={box3MonthlySavings}
+                    onChange={(e) => setBox3MonthlySavings(Number(e.target.value))}
+                    className="w-full bg-transparent text-white font-bold text-xl outline-none"
+                  />
+                </div>
+                <p className="text-slate-500 text-xs mt-1">€{(box3MonthlySavings * 12).toLocaleString()}/year</p>
+              </div>
+              <div className="bg-slate-700/40 rounded-xl p-4 border border-slate-600">
+                <label className="block text-slate-400 text-xs font-medium mb-1">Starting Capital</label>
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400 text-lg">€</span>
+                  <input
+                    type="number" onFocus={handleInputFocus}
+                    min="0" max="5000000" step="1000"
+                    value={box3StartingCapital}
+                    onChange={(e) => setBox3StartingCapital(Number(e.target.value))}
+                    className="w-full bg-transparent text-white font-bold text-xl outline-none"
+                  />
+                </div>
+                <p className="text-slate-500 text-xs mt-1">Current portfolio value</p>
+              </div>
+              <div className="bg-slate-700/40 rounded-xl p-4 border border-slate-600">
+                <label className="block text-slate-400 text-xs font-medium mb-1">Desired Pension (annual)</label>
+                <div className="flex items-center gap-1">
+                  <span className="text-slate-400 text-lg">€</span>
+                  <input
+                    type="number" onFocus={handleInputFocus}
+                    min="10000" max="300000" step="1000"
+                    value={box3AnnualWithdrawal}
+                    onChange={(e) => setBox3AnnualWithdrawal(Number(e.target.value))}
+                    className="w-full bg-transparent text-white font-bold text-xl outline-none"
+                  />
+                </div>
+                <p className="text-slate-500 text-xs mt-1">€{Math.round(annualWithdraw / 12).toLocaleString()}/month in today's money</p>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+              <div className="bg-slate-700/40 rounded-xl p-4 border border-slate-600">
+                <label className="block text-slate-400 text-xs font-medium mb-1">FIRE Age</label>
+                <input
+                  type="number" onFocus={handleInputFocus}
+                  min="30" max="70" step="1"
+                  value={box3FireAge}
+                  onChange={(e) => setBox3FireAge(Number(e.target.value))}
+                  className="w-full bg-transparent text-white font-bold text-xl outline-none"
+                />
+                <p className="text-slate-500 text-xs mt-1">When you want to retire</p>
+              </div>
+              <div className="bg-slate-700/40 rounded-xl p-4 border border-slate-600">
+                <label className="block text-slate-400 text-xs font-medium mb-1">Life Expectancy</label>
+                <input
+                  type="number" onFocus={handleInputFocus}
+                  min="60" max="100" step="1"
+                  value={box3LifeExpectancy}
+                  onChange={(e) => setBox3LifeExpectancy(Number(e.target.value))}
+                  className="w-full bg-transparent text-white font-bold text-xl outline-none"
+                />
+                <p className="text-slate-500 text-xs mt-1">Plan until this age</p>
+              </div>
+            </div>
+            <div className="inline-flex items-center gap-2 bg-slate-700/30 rounded-full px-4 py-2 border border-slate-600">
+              <span className="text-indigo-400">◎</span>
+              <span className="text-slate-300 text-sm">Target portfolio: <strong className="text-white">€{Math.round(annualWithdraw / 0.05).toLocaleString()}</strong> (using a 5% withdrawal rate).</span>
+            </div>
+          </div>
+
+          {/* Controls */}
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
+            {/* Simulation Mode */}
+            <div>
+              <label className="block text-slate-300 font-medium text-sm mb-2">Simulation mode</label>
+              <div className="flex gap-2">
+                {['deterministic', 'monteCarlo'].map(mode => (
+                  <button
+                    key={mode}
+                    onClick={() => setBox3SimMode(mode)}
+                    className={`px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                      box3SimMode === mode
+                        ? 'bg-indigo-600 text-white shadow-md'
+                        : 'bg-slate-800 text-slate-300 border border-slate-600 hover:bg-slate-700'
+                    }`}
+                  >
+                    {mode === 'deterministic' ? 'Deterministic' : 'Monte Carlo'}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Portfolio Type */}
+            <div>
+              <label className="block text-slate-300 font-medium text-sm mb-2">Portfolio type</label>
+              <div className="flex gap-2 flex-wrap">
+                {Object.entries(portfolioProfiles).map(([key, p]) => (
+                  <button
+                    key={key}
+                    onClick={() => setBox3PortfolioType(key)}
+                    className={`px-3 py-2 rounded-lg text-sm font-medium transition-all flex items-center gap-1.5 ${
+                      box3PortfolioType === key
+                        ? 'bg-indigo-600 text-white shadow-md'
+                        : 'bg-slate-800 text-slate-300 border border-slate-600 hover:bg-slate-700'
+                    }`}
+                  >
+                    <span>{p.emoji}</span> {p.label}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Charts Side-by-Side */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-10">
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-3 h-3 rounded-full bg-blue-600"></span>
+                <span className="text-slate-300 font-medium text-sm">NL: Box3 Taxes (2026)</span>
+              </div>
+              {renderChart(sim2026, globalMax, '2026')}
+            </div>
+            <div>
+              <div className="flex items-center gap-2 mb-3">
+                <span className="w-3 h-3 rounded-full bg-red-500"></span>
+                <span className="text-slate-300 font-medium text-sm">NL: Box3 Taxes (2028 - Proposed)</span>
+              </div>
+              {renderChart(sim2028, globalMax, '2028')}
+            </div>
+          </div>
+
+          {/* Impact Summary */}
+          <div className="mb-10">
+            <h2 className="text-xl font-bold text-white mb-4">Impact Summary</h2>
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
+              {/* FIRE Delayed */}
+              <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-6">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="w-8 h-8 bg-orange-500/20 rounded-full flex items-center justify-center">
+                    <span className="text-orange-400 text-sm">⏱</span>
+                  </div>
+                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">FIRE Delayed By</span>
+                </div>
+                <p className="text-4xl font-black text-orange-400 mb-1">+ {fireDelay.toFixed(1)} <span className="text-lg font-medium text-slate-500">years</span></p>
+                <p className="text-slate-400 text-xs mt-2">
+                  With nl: box3 taxes (2028 - proposed), you'll need to work <strong className="text-slate-300">{fireDelay.toFixed(1)} years longer</strong> to reach FIRE.
+                </p>
+              </div>
+
+              {/* Additional Investment */}
+              <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-6">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="w-8 h-8 bg-emerald-500/20 rounded-full flex items-center justify-center">
+                    <span className="text-emerald-400 text-sm">◎</span>
+                  </div>
+                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Additional Investment Needed</span>
+                </div>
+                <p className="text-4xl font-black text-emerald-400 mb-1">+ €{additionalInvestment.toFixed(1)}K</p>
+                <p className="text-slate-400 text-xs mt-2">
+                  NL: Box3 Taxes (2028 - Proposed) requires you to save <strong className="text-slate-300">€{additionalInvestment.toFixed(1)}K more</strong> to reach your FIRE target.
+                </p>
+              </div>
+
+              {/* Additional Years */}
+              <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-6">
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="w-8 h-8 bg-blue-500/20 rounded-full flex items-center justify-center">
+                    <span className="text-blue-400 text-sm">📅</span>
+                  </div>
+                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Additional Years Investing</span>
+                </div>
+                <p className="text-4xl font-black text-blue-400 mb-1">+ {fireDelay.toFixed(1)} <span className="text-lg font-medium text-slate-500">years</span></p>
+                <p className="text-slate-400 text-xs mt-2">
+                  You'll need to invest for <strong className="text-slate-300">{fireDelay.toFixed(1)} more years</strong> with nl: box3 taxes (2028 - proposed).
+                </p>
+              </div>
+            </div>
+          </div>
+
+          {/* Detailed Stats Row */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-5 mb-10">
+            {/* FIRE Age */}
+            <div className="bg-slate-800/40 backdrop-blur-sm rounded-2xl border border-slate-700 p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <div className="w-8 h-8 bg-slate-700/50 rounded-full flex items-center justify-center">
+                  <span className="text-slate-300 text-sm">⏰</span>
+                </div>
+                <div>
+                  <h4 className="text-white font-bold text-sm">FIRE Age</h4>
+                  <p className="text-slate-500 text-xs">When you can retire</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2026)</p>
+                  <p className="text-4xl font-black text-blue-400">{sim2026.fireAge}</p>
+                  <p className="text-slate-500 text-xs">({2026 + (sim2026.fireAge - currentAge)})</p>
+                </div>
+                <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2028 - Proposed)</p>
+                  <p className="text-4xl font-black text-red-400">{sim2028.fireAge}</p>
+                  <p className="text-slate-500 text-xs">({2026 + (sim2028.fireAge - currentAge)})</p>
+                </div>
+              </div>
+              <div className="mt-3 bg-slate-700/20 rounded-lg p-2 border border-slate-600/50">
+                <p className="text-slate-400 text-xs">
+                  With <strong className="text-slate-300">nl: box3 taxes (2026)</strong>, you can retire at age {sim2026.fireAge}. With <strong className="text-slate-300">NL: Box3 Taxes (2028 - proposed)</strong>, you'll need to work until age {sim2028.fireAge}.
+                </p>
+              </div>
+            </div>
+
+            {/* Tax Paid */}
+            <div className="bg-slate-800/40 backdrop-blur-sm rounded-2xl border border-slate-700 p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <div className="w-8 h-8 bg-slate-700/50 rounded-full flex items-center justify-center">
+                  <span className="text-slate-300 text-sm">🏛</span>
+                </div>
+                <div>
+                  <h4 className="text-white font-bold text-sm">Tax Paid</h4>
+                  <p className="text-slate-500 text-xs">Total tax over journey and per €100 gained</p>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2026)</p>
+                  <p className="text-2xl font-black text-blue-400">€{Math.round(sim2026.totalTax).toLocaleString()}</p>
+                  <p className="text-slate-500 text-xs">Tax · {sim2026.totalGains > 0 ? (sim2026.totalTax / sim2026.totalGains * 100).toFixed(1) : '0'} € per €100 gained</p>
+                </div>
+                <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2028 - Proposed)</p>
+                  <p className="text-2xl font-black text-red-400">€{Math.round(sim2028.totalTax).toLocaleString()}</p>
+                  <p className="text-slate-500 text-xs">Tax · {sim2028.totalGains > 0 ? (sim2028.totalTax / sim2028.totalGains * 100).toFixed(1) : '0'} € per €100 gained</p>
+                </div>
+              </div>
+              <div className="mt-3 bg-slate-700/20 rounded-lg p-2 border border-slate-600/50">
+                <p className="text-slate-400 text-xs">
+                  With <strong className="text-slate-300">NL: Box3 Taxes (2028 - Proposed)</strong> you pay <strong className="text-slate-300">€{Math.round(taxDiff).toLocaleString()} more</strong> in tax over lifetime.
+                </p>
+              </div>
+            </div>
+
+            {/* Annual Withdrawal at FIRE */}
+            <div className="bg-slate-800/40 backdrop-blur-sm rounded-2xl border border-slate-700 p-6">
+              <div className="flex items-center gap-2 mb-4">
+                <div className="w-8 h-8 bg-slate-700/50 rounded-full flex items-center justify-center">
+                  <span className="text-slate-300 text-sm">💲</span>
+                </div>
+                <div>
+                  <h4 className="text-white font-bold text-sm">Annual Withdrawal at FIRE</h4>
+                  <p className="text-slate-500 text-xs">How your current lifestyle translates at retirement</p>
+                </div>
+              </div>
+              <p className="text-slate-400 text-xs mb-3">
+                Your current lifestyle of <strong className="text-slate-300">€{annualWithdraw.toLocaleString()}/year</strong> (today's money) will become:
+              </p>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2026)</p>
+                  <p className="text-2xl font-black text-blue-400">€{withdrawAtFire2026.toLocaleString()}</p>
+                  <p className="text-slate-500 text-xs">After {yearsToFire2026} years (current Box 3)</p>
+                </div>
+                <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2028 - Proposed)</p>
+                  <p className="text-2xl font-black text-red-400">€{withdrawAtFire2028.toLocaleString()}</p>
+                  <p className="text-slate-500 text-xs">After {yearsToFire2028} years (proposed 2028)</p>
+                </div>
+              </div>
+            </div>
+          </div>
+
+          {/* CTA */}
+          <div className="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-2xl p-8 text-center mb-8">
+            <h2 className="text-2xl font-bold text-white mb-3">Want a personalized strategy to minimize your 2028 tax impact?</h2>
+            <p className="text-indigo-100 mb-6">Get your full AI-powered wealth strategy with Dutch tax optimization</p>
+            <button
+              onClick={() => { setShowBox3Comparison(false); setShowQuestionnaire(true); setCurrentStep('household'); }}
+              className="bg-white hover:bg-indigo-50 text-indigo-600 font-bold px-8 py-4 rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105 text-lg"
+            >
+              Get Your Strategy →
+            </button>
+          </div>
+        </div>
+      </div>
+      {paymentModal}
+      </>
+    );
+  }
+
   // Comparison Page UI
   if (showComparison) {
     return (
+      <>
       <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
           {/* Back Button */}
@@ -1294,7 +2912,10 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
               Download your personalized PDF roadmap with detailed action steps
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center items-center">
-              <button className="bg-white hover:bg-emerald-50 text-emerald-600 font-bold px-8 py-4 rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105 text-lg">
+              <button 
+                onClick={handlePurchasePDF}
+                className="bg-white hover:bg-emerald-50 text-emerald-600 font-bold px-8 py-4 rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105 text-lg"
+              >
                 Purchase PDF for €29 →
               </button>
               <button
@@ -1307,12 +2928,15 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
           </div>
         </div>
       </div>
+      {paymentModal}
+      </>
     );
   }
 
   // Results Page UI
   if (showResults) {
     return (
+      <>
       <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
         {/* Main Content */}
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
@@ -1343,7 +2967,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                 </div>
                 <div className="flex-shrink-0">
                   <button 
-                    onClick={() => setShowComparison(true)}
+                    onClick={handlePurchasePDF}
                     className="bg-white hover:bg-emerald-50 text-emerald-600 font-bold px-6 sm:px-8 py-3 sm:py-4 rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105 text-sm sm:text-base"
                   >
                     Get Full PDF Roadmap →
@@ -1447,12 +3071,50 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
             </button>
           </div>
 
+          {/* DATA AUDIT Block */}
+          <div className="bg-slate-800/60 border border-slate-700/50 rounded-2xl p-5 sm:p-6 mb-8 sm:mb-10">
+            <div className="flex items-center gap-2 mb-4">
+              <svg className="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
+              </svg>
+              <h3 className="text-white font-bold text-sm sm:text-base tracking-wider uppercase">Data Audit <span className="text-slate-400 font-normal normal-case tracking-normal">(Based on Your Inputs)</span></h3>
+            </div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2">
+              <div className="flex items-center justify-between py-2 border-b border-slate-700/40">
+                <span className="text-slate-400 text-sm">Reporting Date</span>
+                <span className="text-white text-sm font-medium">{new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
+              </div>
+              <div className="flex items-center justify-between py-2 border-b border-slate-700/40">
+                <span className="text-slate-400 text-sm">Residency</span>
+                <span className="text-white text-sm font-medium">Arrived in NL at Age {formData.arrivalAgeNL || (parseInt(formData.age) - (50 - (formData.yearsAbroad || 0)))}</span>
+              </div>
+              <div className="flex items-center justify-between py-2 border-b border-slate-700/40">
+                <span className="text-slate-400 text-sm">Current Assets</span>
+                <span className="text-white text-sm font-medium">€{((formData.savingsBalance || 0) + (formData.cryptoValueDec31 || 0) + (formData.propertyValue || 0)).toLocaleString()}</span>
+              </div>
+              <div className="flex items-center justify-between py-2 border-b border-slate-700/40">
+                <span className="text-slate-400 text-sm">Primary Residence</span>
+                <span className="text-white text-sm font-medium">€{(formData.propertyValue || 0).toLocaleString()} (WOZ)</span>
+              </div>
+              <div className="flex items-center justify-between py-2 border-b border-slate-700/40 sm:border-b-0">
+                <span className="text-slate-400 text-sm">Retirement Goal</span>
+                <span className="text-white text-sm font-medium">€{(formData.desiredMonthlyIncome || 0).toLocaleString()}/mo at Age {formData.targetRetirementAge || formData.retirementAge}</span>
+              </div>
+            </div>
+            <p className="text-slate-500 text-xs mt-4 italic">
+              Calculation Note: Projections assume a 2.2% annual inflation rate and 2026–2028 Dutch tax brackets.
+            </p>
+          </div>
+
           {/* Personalized Strategy Section */}
           <div className="bg-slate-800 rounded-2xl p-6 sm:p-8 mb-8 sm:mb-12 border border-slate-700">
             <div className="flex items-start gap-3 mb-6">
               <span className="text-2xl">💡</span>
               <h2 className="text-white text-xl sm:text-2xl font-bold">Your Personalized Strategy</h2>
             </div>
+            <p className="text-slate-400 text-sm mb-6 italic border-l-2 border-emerald-500/40 pl-4">
+              This personalized strategy was engineered by the VrijWealth AI engine based on the unique financial profile and goals you provided. It is designed to provide high-level tax-optimization pathways and a structural roadmap for 2026-2028.
+            </p>
             
             <div className="prose prose-invert prose-slate max-w-none">
               <div className="text-slate-300 leading-relaxed text-sm sm:text-base space-y-4">
@@ -2039,6 +3701,8 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
           </div>
         </div>
       </div>
+      {paymentModal}
+      </>
     );
   }
 
@@ -2175,6 +3839,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                       <select
                         value={formData.country}
                         onChange={(e) => updateFormData('country', e.target.value)}
+                        autoComplete="off"
                         className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                       >
                         <option value="Netherlands">🇳🇱 Netherlands</option>
@@ -2188,6 +3853,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                         value={formData.fullName}
                         onChange={(e) => updateFormData('fullName', e.target.value)}
                         placeholder="Your name"
+                        autoComplete="off"
                         className={`w-full bg-slate-800 border ${validationErrors.fullName ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                       />
                       {validationErrors.fullName && (
@@ -2198,9 +3864,10 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                     <div>
                       <label className="block text-white font-medium mb-2">Age</label>
                       <input
-                        type="number"
+                        type="number" onFocus={handleInputFocus}
                         value={formData.age}
                         onChange={(e) => updateFormData('age', Number(e.target.value))}
+                        autoComplete="off"
                         className={`w-full bg-slate-800 border ${validationErrors.age ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                       />
                       {validationErrors.age && (
@@ -2211,9 +3878,10 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                     <div>
                       <label className="block text-white font-medium mb-2">Target Retirement Age</label>
                       <input
-                        type="number"
+                        type="number" onFocus={handleInputFocus}
                         value={formData.retirementAge}
                         onChange={(e) => updateFormData('retirementAge', Number(e.target.value))}
+                        autoComplete="off"
                         className={`w-full bg-slate-800 border ${validationErrors.retirementAge ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                       />
                       {validationErrors.retirementAge && (
@@ -2257,7 +3925,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                       <div>
                         <label className="block text-white font-medium mb-2">Number of Children</label>
                         <input
-                          type="number"
+                          type="number" onFocus={handleInputFocus}
                           value={formData.childrenCount}
                           onChange={(e) => updateFormData('childrenCount', Number(e.target.value))}
                           className={`w-full bg-slate-800 border ${validationErrors.childrenCount ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
@@ -2310,7 +3978,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.grossSalary}
                               onChange={(e) => updateFormData('grossSalary', Number(e.target.value))}
                               className={`w-full bg-slate-800 border ${validationErrors.grossSalary ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
@@ -2327,7 +3995,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                             <div className="relative">
                               <span className="absolute left-4 top-3 text-slate-400">€</span>
                               <input
-                                type="number"
+                                type="number" onFocus={handleInputFocus}
                                 value={formData.spouseGrossSalary}
                                 onChange={(e) => updateFormData('spouseGrossSalary', Number(e.target.value))}
                                 className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -2368,7 +4036,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.savingsBalance}
                               onChange={(e) => updateFormData('savingsBalance', Number(e.target.value))}
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -2380,7 +4048,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.interestEarned}
                               onChange={(e) => updateFormData('interestEarned', Number(e.target.value))}
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -2401,7 +4069,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.cryptoValueJan1}
                               onChange={(e) => updateFormData('cryptoValueJan1', Number(e.target.value))}
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -2413,7 +4081,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.cryptoValueDec31}
                               onChange={(e) => updateFormData('cryptoValueDec31', Number(e.target.value))}
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -2425,7 +4093,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.dividendsReceived}
                               onChange={(e) => updateFormData('dividendsReceived', Number(e.target.value))}
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -2446,7 +4114,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.debtInterest}
                               onChange={(e) => updateFormData('debtInterest', Number(e.target.value))}
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -2507,7 +4175,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                         <div>
                           <label className="block text-white font-medium mb-2 text-sm">{formData.hasSpouse ? 'Your Arrival Age in the Netherlands' : 'Arrival Age in the Netherlands'}</label>
                           <input
-                            type="number"
+                            type="number" onFocus={handleInputFocus}
                             value={formData.arrivalAgeNL}
                             onChange={(e) => updateFormData('arrivalAgeNL', Number(e.target.value))}
                             placeholder="e.g. 0 if born here, 25 if moved at 25"
@@ -2519,7 +4187,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                         <div>
                           <label className="block text-white font-medium mb-2 text-sm">Years Spent Abroad (Post-Arrival)</label>
                           <input
-                            type="number"
+                            type="number" onFocus={handleInputFocus}
                             value={formData.yearsAbroad}
                             onChange={(e) => updateFormData('yearsAbroad', Number(e.target.value))}
                             placeholder="0"
@@ -2556,7 +4224,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div>
                             <label className="block text-white font-medium mb-2 text-sm">Spouse Arrival Age in the Netherlands</label>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.spouseArrivalAgeNL}
                               onChange={(e) => updateFormData('spouseArrivalAgeNL', Number(e.target.value))}
                               placeholder="e.g. 0 if born here, 25 if moved at 25"
@@ -2568,7 +4236,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div>
                             <label className="block text-white font-medium mb-2 text-sm">Spouse Years Spent Abroad (Post-Arrival)</label>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.spouseYearsAbroad}
                               onChange={(e) => updateFormData('spouseYearsAbroad', Number(e.target.value))}
                               placeholder="0"
@@ -2608,7 +4276,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.builtUpPension}
                               onChange={(e) => updateFormData('builtUpPension', Number(e.target.value))}
                               placeholder="e.g. 150000"
@@ -2635,7 +4303,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.factorA}
                               onChange={(e) => {
                                 const val = Number(e.target.value);
@@ -2701,7 +4369,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                             <div className="relative">
                               <span className="absolute left-4 top-3 text-slate-400">€</span>
                               <input
-                                type="number"
+                                type="number" onFocus={handleInputFocus}
                                 value={formData.spouseBuiltUpPension}
                                 onChange={(e) => updateFormData('spouseBuiltUpPension', Number(e.target.value))}
                                 placeholder="e.g. 80000"
@@ -2728,7 +4396,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                             <div className="relative">
                               <span className="absolute left-4 top-3 text-slate-400">€</span>
                               <input
-                                type="number"
+                                type="number" onFocus={handleInputFocus}
                                 value={formData.spouseFactorA}
                                 onChange={(e) => {
                                   const val = Number(e.target.value);
@@ -2782,7 +4450,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.jaarruimte}
                               readOnly
                               className="w-full bg-slate-800/50 border border-slate-700 text-emerald-400 font-semibold pl-8 pr-4 py-3 rounded-lg cursor-not-allowed"
@@ -2801,7 +4469,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.reserveringsruimte}
                               onChange={(e) => updateFormData('reserveringsruimte', Number(e.target.value))}
                               placeholder="0"
@@ -2853,7 +4521,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                             <div className="relative">
                               <span className="absolute left-4 top-3 text-slate-400">€</span>
                               <input
-                                type="number"
+                                type="number" onFocus={handleInputFocus}
                                 value={formData.spouseJaarruimte}
                                 readOnly
                                 className="w-full bg-slate-800/50 border border-slate-700 text-emerald-400 font-semibold pl-8 pr-4 py-3 rounded-lg cursor-not-allowed"
@@ -2869,7 +4537,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                             <div className="relative">
                               <span className="absolute left-4 top-3 text-slate-400">€</span>
                               <input
-                                type="number"
+                                type="number" onFocus={handleInputFocus}
                                 value={formData.spouseReserveringsruimte}
                                 onChange={(e) => updateFormData('spouseReserveringsruimte', Number(e.target.value))}
                                 placeholder="0"
@@ -2995,7 +4663,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.propertyValue}
                               onChange={(e) => updateFormData('propertyValue', Number(e.target.value))}
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -3008,7 +4676,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.mortgageBalance}
                               onChange={(e) => updateFormData('mortgageBalance', Number(e.target.value))}
                               placeholder="Remaining principal on your loan"
@@ -3035,7 +4703,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           </div>
                           <div className="relative">
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               step="0.1"
                               value={formData.mortgageInterestRate}
                               onChange={(e) => updateFormData('mortgageInterestRate', Number(e.target.value))}
@@ -3053,7 +4721,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                         <div>
                           <label className="block text-white font-medium mb-2 text-sm">Remaining Term (Years)</label>
                           <input
-                            type="number"
+                            type="number" onFocus={handleInputFocus}
                             value={formData.mortgageYearsLeft}
                             onChange={(e) => updateFormData('mortgageYearsLeft', Number(e.target.value))}
                             placeholder="When will the monthly burn rate drop to zero?"
@@ -3078,7 +4746,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.targetPropertyValue}
                               onChange={(e) => updateFormData('targetPropertyValue', Number(e.target.value))}
                               placeholder="Value of your dream/upgraded home"
@@ -3110,7 +4778,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.rentalIncome}
                               onChange={(e) => updateFormData('rentalIncome', Number(e.target.value))}
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -3122,7 +4790,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.saleProceeds}
                               onChange={(e) => updateFormData('saleProceeds', Number(e.target.value))}
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -3135,7 +4803,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.purchasePrice}
                               onChange={(e) => updateFormData('purchasePrice', Number(e.target.value))}
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -3156,7 +4824,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.priorYearLoss}
                               onChange={(e) => updateFormData('priorYearLoss', Number(e.target.value))}
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
@@ -3306,7 +4974,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                         <div>
                           <label className="block text-white font-medium mb-2 text-sm">Target Retirement Age</label>
                           <input
-                            type="number"
+                            type="number" onFocus={handleInputFocus}
                             value={formData.targetRetirementAge}
                             onChange={(e) => updateFormData('targetRetirementAge', Number(e.target.value))}
                             min="30"
@@ -3323,7 +4991,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
-                              type="number"
+                              type="number" onFocus={handleInputFocus}
                               value={formData.desiredMonthlyIncome}
                               onChange={(e) => updateFormData('desiredMonthlyIncome', Number(e.target.value))}
                               placeholder="How much do you need to live comfortably?"
@@ -3337,7 +5005,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
                         <div>
                           <label className="block text-white font-medium mb-2 text-sm">Life Expectancy (for modelling)</label>
                           <input
-                            type="number"
+                            type="number" onFocus={handleInputFocus}
                             value={formData.lifeExpectancy}
                             onChange={(e) => updateFormData('lifeExpectancy', Number(e.target.value))}
                             min="65"
@@ -3598,7 +5266,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
               <svg className="w-7 h-7 sm:w-8 sm:h-8 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M3 17l6-6 4 4 8-8M21 7v6h-6" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
-              <span className="text-lg sm:text-xl font-bold text-white hidden sm:inline">ExitWay</span>
+              <span className="text-lg sm:text-xl font-bold text-white hidden sm:inline">VrijWealth</span>
             </div>
 
             {/* Center Navigation Links */}
@@ -4157,6 +5825,27 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
             </div>
           </div>
 
+          {/* Detailed 2028 Comparison CTA */}
+          <div className="flex justify-center mb-12">
+            <button
+              onClick={() => setShowBox3Comparison(true)}
+              className="group relative bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-bold px-8 py-4 rounded-2xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105 flex items-center gap-3"
+            >
+              <div className="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center">
+                <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                </svg>
+              </div>
+              <div className="text-left">
+                <span className="block text-lg">Detailed Comparison of 2028 Changes</span>
+                <span className="block text-indigo-200 text-xs font-normal">See portfolio projections, FIRE impact & tax simulation side-by-side</span>
+              </div>
+              <svg className="w-5 h-5 text-white/70 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+              </svg>
+            </button>
+          </div>
+
           {/* Information Cards - 3 Column Layout */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
             {/* Box 1 - Red - The Risk */}
@@ -4672,7 +6361,7 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
               <svg className="w-7 h-7 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                 <path d="M3 17l6-6 4 4 8-8M21 7v6h-6" strokeLinecap="round" strokeLinejoin="round"/>
               </svg>
-              <span className="text-lg font-bold text-white">ExitWay</span>
+              <span className="text-lg font-bold text-white">VrijWealth</span>
             </div>
 
             {/* Copyright */}
@@ -4682,6 +6371,9 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
 
             {/* Links */}
             <div className="flex items-center gap-6">
+              <button onClick={() => setShowDisclaimer(true)} className="text-slate-400 hover:text-white text-sm transition-colors">
+                Disclaimer
+              </button>
               <a href="#privacy" className="text-slate-400 hover:text-white text-sm transition-colors">
                 {t.footer.privacy}
               </a>
@@ -4692,6 +6384,8 @@ STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetiremen
           </div>
         </div>
       </footer>
+
+      {paymentModal}
 
     </div>
   )

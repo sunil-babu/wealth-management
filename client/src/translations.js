@@ -127,7 +127,7 @@ export const translations = {
     trust: {
       badge: 'TRUST & PRIVACY',
       title: 'Your Data, Your Control',
-      subtitle: 'We built ExitWay with a privacy-first philosophy. Your financial data deserves the highest level of protection.',
+      subtitle: 'We built VrijWealth with a privacy-first philosophy. Your financial data deserves the highest level of protection.',
       encryptionTitle: 'End-to-End Encryption',
       encryptionText: 'All data is encrypted in transit and at rest using industry-standard AES-256 encryption.',
       privacyTitle: 'Privacy-First Architecture',
@@ -138,7 +138,7 @@ export const translations = {
       noShareText: 'Your financial information is never shared with, sold to, or accessed by third parties.'
     },
     footer: {
-      copyright: '© 2026 ExitWay. Navigate Your Wealth. Design Your Freedom.',
+      copyright: '© 2026 VrijWealth. Navigate Your Wealth. Design Your Freedom.',
       privacy: 'Privacy',
       terms: 'Terms'
     }
@@ -271,7 +271,7 @@ export const translations = {
     trust: {
       badge: 'VERTROUWEN & PRIVACY',
       title: 'Jouw Data, Jouw Controle',
-      subtitle: 'We hebben ExitWay gebouwd met een privacy-first filosofie. Jouw financiële gegevens verdienen het hoogste niveau van bescherming.',
+      subtitle: 'We hebben VrijWealth gebouwd met een privacy-first filosofie. Jouw financiële gegevens verdienen het hoogste niveau van bescherming.',
       encryptionTitle: 'End-to-End Encryptie',
       encryptionText: 'Alle gegevens worden versleuteld tijdens verzending en opslag met behulp van industriestandaard AES-256-versleuteling.',
       privacyTitle: 'Privacy-First Architectuur',
@@ -282,7 +282,7 @@ export const translations = {
       noShareText: 'Jouw financiële informatie wordt nooit gedeeld met, verkocht aan of geopend door derden.'
     },
     footer: {
-      copyright: '© 2026 ExitWay. Navigeer Jouw Vermogen. Ontwerp Jouw Vrijheid.',
+      copyright: '© 2026 VrijWealth. Navigeer Jouw Vermogen. Ontwerp Jouw Vrijheid.',
       privacy: 'Privacy',
       terms: 'Voorwaarden'
     }
