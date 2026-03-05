@@ -1495,6 +1495,14 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph about y
     setValidationErrors({});
   };
 
+  const scrollToTop = () => {
+    // Scroll window for mobile (min-h-screen layout)
+    window.scrollTo({ top: 0, behavior: 'instant' });
+    // Scroll inner container for desktop (overflow-y-auto)
+    const scrollContainer = document.querySelector('.overflow-y-auto');
+    if (scrollContainer) scrollContainer.scrollTop = 0;
+  };
+
   const handleContinue = async () => {
     // Validate current step
     const errors = validateStep(currentStep);
@@ -1519,6 +1527,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph about y
       // Submit to Vertex AI
       await submitToVertexAI();
     }
+    scrollToTop();
   };
 
   const handleBack = () => {
@@ -1531,6 +1540,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph about y
     } else if (currentStep === 'retirement') {
       setCurrentStep('realEstate');
     }
+    scrollToTop();
   };
 
   const submitToVertexAI = async () => {
@@ -4083,7 +4093,7 @@ IMPORTANT: Keep the STRATEGIC SUMMARY section to a maximum of 150 words. Do NOT 
 
             <nav className="space-y-2">
               <button
-                onClick={() => setCurrentStep('household')}
+                onClick={() => { setCurrentStep('household'); scrollToTop(); }}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
                   currentStep === 'household' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
                 }`}
@@ -4095,7 +4105,7 @@ IMPORTANT: Keep the STRATEGIC SUMMARY section to a maximum of 150 words. Do NOT 
               </button>
 
               <button
-                onClick={() => setCurrentStep('financials')}
+                onClick={() => { setCurrentStep('financials'); scrollToTop(); }}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
                   currentStep === 'financials' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
                 }`}
@@ -4107,7 +4117,7 @@ IMPORTANT: Keep the STRATEGIC SUMMARY section to a maximum of 150 words. Do NOT 
               </button>
 
               <button
-                onClick={() => setCurrentStep('pension')}
+                onClick={() => { setCurrentStep('pension'); scrollToTop(); }}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
                   currentStep === 'pension' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
                 }`}
@@ -4119,7 +4129,7 @@ IMPORTANT: Keep the STRATEGIC SUMMARY section to a maximum of 150 words. Do NOT 
               </button>
 
               <button
-                onClick={() => setCurrentStep('realEstate')}
+                onClick={() => { setCurrentStep('realEstate'); scrollToTop(); }}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
                   currentStep === 'realEstate' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
                 }`}
@@ -4131,7 +4141,7 @@ IMPORTANT: Keep the STRATEGIC SUMMARY section to a maximum of 150 words. Do NOT 
               </button>
 
               <button
-                onClick={() => setCurrentStep('retirement')}
+                onClick={() => { setCurrentStep('retirement'); scrollToTop(); }}
                 className={`w-full flex items-center gap-3 px-4 py-3 rounded-lg transition-all ${
                   currentStep === 'retirement' ? 'bg-emerald-500/20 text-emerald-400' : 'text-slate-400 hover:text-white hover:bg-slate-800/50'
                 }`}
