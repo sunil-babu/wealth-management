@@ -1,7 +1,32 @@
 import React, { useState, useEffect } from 'react'
 import { translations } from './translations'
+import { computeDerivedValues, SWR, INFLATION_RATE } from './utils/financialCalcs'
+import { parseAiResponse, fallbackAllocation, applyMetricFallbacks } from './utils/responseParser'
 
 export default function App() {
+  // Theme state — persisted to localStorage
+  const [darkMode, setDarkMode] = useState(() => {
+    if (typeof window !== 'undefined') {
+      const saved = localStorage.getItem('theme');
+      if (saved) return saved === 'dark';
+      return window.matchMedia('(prefers-color-scheme: dark)').matches;
+    }
+    return true;
+  });
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (darkMode) {
+      root.classList.add('dark');
+      localStorage.setItem('theme', 'dark');
+    } else {
+      root.classList.remove('dark');
+      localStorage.setItem('theme', 'light');
+    }
+  }, [darkMode]);
+
+  const toggleDarkMode = () => setDarkMode(prev => !prev);
+
   const [language, setLanguage] = useState('en');
   const [showLangDropdown, setShowLangDropdown] = useState(false);
   const [preset, setPreset] = useState('growing');
@@ -37,6 +62,7 @@ export default function App() {
   const [showQuestionnaire, setShowQuestionnaire] = useState(false);
   const [currentStep, setCurrentStep] = useState('household');
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [basicRetryCount, setBasicRetryCount] = useState(0);
   const [loadingMessageIndex, setLoadingMessageIndex] = useState(0);
   const [validationErrors, setValidationErrors] = useState({});
   
@@ -95,6 +121,14 @@ export default function App() {
   const [disclaimerAccepted, setDisclaimerAccepted] = useState(false);
   const [pdfContent, setPdfContent] = useState(null);
 
+  // Retry & email fallback state
+  const [pdfRetryCount, setPdfRetryCount] = useState(0);
+  const [pdfRetriesExhausted, setPdfRetriesExhausted] = useState(false);
+  const [emailForPdf, setEmailForPdf] = useState('');
+  const [emailSubmitted, setEmailSubmitted] = useState(false);
+  const [emailSubmitting, setEmailSubmitting] = useState(false);
+  const [lastPromptForRetry, setLastPromptForRetry] = useState('');
+
   // Mock Stripe payment handler
   const handlePurchasePDF = () => {
     setShowPaymentModal(true);
@@ -104,6 +138,12 @@ export default function App() {
     setPdfReady(false);
     setPdfContent(null);
     setDisclaimerAccepted(false);
+    setPdfRetryCount(0);
+    setPdfRetriesExhausted(false);
+    setEmailForPdf('');
+    setEmailSubmitted(false);
+    setEmailSubmitting(false);
+    setLastPromptForRetry('');
   };
 
   const handleMockPayment = () => {
@@ -121,25 +161,14 @@ export default function App() {
     setPdfGenerating(true);
     setPdfReady(false);
 
-    // Pre-computed values for prompt
-    const age = parseInt(formData.age) || 30;
-    const aowPct = Math.max(0, Math.min(100, (50 - formData.yearsAbroad) * 2));
-    const bridgeYrs = Math.max(0, Math.round((67.25 - formData.targetRetirementAge) * 10) / 10);
-    const bridgeCost = Math.round(bridgeYrs * 12 * formData.desiredMonthlyIncome);
-    const netWealth = formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue - formData.mortgageBalance;
-    const equity = formData.propertyValue - formData.mortgageBalance;
-    const p3Room = formData.jaarruimte + formData.reserveringsruimte;
-    const aowShortfall = Math.round((1 - aowPct / 100) * 1637);
-    const arrivalAge = formData.arrivalAgeNL || (age - (50 - formData.yearsAbroad));
-    const stockValue = formData.cryptoValueDec31 + (formData.investmentAmount || 0);
-    const totalBox3 = formData.savingsBalance + formData.cryptoValueDec31;
-    const fictitiousTax2026 = Math.round(0.36 * (stockValue * 0.06 + formData.savingsBalance * 0.0144) - (formData.hasSpouse ? 114000 : 57000) * 0.0144 * 0.36);
-    const retirementYears = formData.lifeExpectancy - formData.targetRetirementAge;
-    const yearsToFire = Math.max(0, formData.targetRetirementAge - age);
-    const inflationRate = 0.022;
-    const inflationMultiplier = Math.pow(1 + inflationRate, yearsToFire);
-    const futureMonthlyNeed = Math.round(formData.desiredMonthlyIncome * inflationMultiplier);
-    const futureBridgeCost = Math.round(bridgeYrs * 12 * futureMonthlyNeed);
+    // Use shared financial calculations
+    const derived = computeDerivedValues(formData);
+    const {
+      age, aowPct, bridgeYrs, bridgeCost, netWealth, equity, p3Room,
+      aowShortfall, arrivalAge, stockValue, totalBox3, fictitiousTax,
+      retirementYears, yearsToFire, inflationMultiplier, futureMonthlyNeed, futureBridgeCost,
+    } = derived;
+    const fictitiousTax2026 = fictitiousTax;
 
     const premiumPrompt = `Role: You are a Senior Dutch & International Wealth Architect specializing in FIRE (Financial Independence, Retire Early).
 Goal: Generate a high-stakes, 2026-optimized Wealth Protection & Early Retirement Roadmap.
@@ -276,48 +305,100 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph about y
         throw new Error('Empty response from AI service');
       }
 
+      // Check completeness — server already retried, but verify on client side too
+      const sectionCount = (responseText.match(/## SECTION/gi) || []).length;
+      const serverMeta = result._meta || {};
+      const isComplete = serverMeta.complete !== undefined ? serverMeta.complete : (sectionCount >= 6);
+      console.log(`PDF response: ${responseText.length} chars, ${sectionCount} sections, complete=${isComplete}, retry=${pdfRetryCount}`);
+
+      if (!isComplete && pdfRetryCount < 2) {
+        // Auto-retry from the client side (server already retried 3x, try again from scratch)
+        console.warn(`Incomplete response (${sectionCount}/8 sections), client retry ${pdfRetryCount + 1}/3...`);
+        setPdfRetryCount(prev => prev + 1);
+        // Small delay before retry
+        await new Promise(r => setTimeout(r, 2000));
+        return generatePremiumPDF();
+      }
+
+      if (!isComplete && pdfRetryCount >= 2) {
+        // All retries exhausted — show email fallback
+        console.warn('All retries exhausted. Offering email fallback.');
+        setPdfRetriesExhausted(true);
+        setPdfGenerating(false);
+        setLastPromptForRetry(premiumPrompt);
+        // Still store partial content so user can download what we have
+        if (responseText.length > 500) {
+          setPdfContent(responseText);
+        }
+        return;
+      }
+
       setPdfContent(responseText);
       setPdfReady(true);
       setPdfGenerating(false);
     } catch (err) {
       console.error('PDF generation error:', err);
+
+      // Auto-retry on network/server errors
+      if (pdfRetryCount < 2) {
+        console.warn(`PDF error, client retry ${pdfRetryCount + 1}/3...`);
+        setPdfRetryCount(prev => prev + 1);
+        await new Promise(r => setTimeout(r, 3000));
+        return generatePremiumPDF();
+      }
+
+      // All retries exhausted
+      setPdfRetriesExhausted(true);
+      setPdfGenerating(false);
+      setLastPromptForRetry(premiumPrompt);
+
       // Fallback: use existing AI response if available
       if (aiResponse && aiResponse.trim().length > 0) {
         setPdfContent(aiResponse);
-        setPdfReady(true);
-      } else {
-        setPdfContent('## Error Generating Report\n\nThe AI service could not generate your premium report at this time. Please try again later or contact support.\n\n**Error:** ' + err.message);
-        setPdfReady(true);
       }
-      setPdfGenerating(false);
     }
+  };
+
+  // Handle email submission for deferred PDF delivery
+  const handleEmailSubmit = async () => {
+    if (!emailForPdf || !emailForPdf.includes('@')) return;
+    setEmailSubmitting(true);
+    try {
+      const response = await fetch('/api/queue-pdf-email', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: emailForPdf,
+          prompt: lastPromptForRetry,
+          partialContent: pdfContent || ''
+        }),
+      });
+      if (response.ok) {
+        setEmailSubmitted(true);
+      } else {
+        console.error('Email queue error:', await response.text());
+        alert('Failed to queue email. Please try again or contact support.');
+      }
+    } catch (err) {
+      console.error('Email submit error:', err);
+      alert('Network error. Please try again.');
+    }
+    setEmailSubmitting(false);
   };
 
   const handleDownloadPDF = () => {
     const content = pdfContent || aiResponse;
-    const dateStr = new Date().toLocaleDateString('en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
-    const netWealth = formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue - formData.mortgageBalance;
-    const age = parseInt(formData.age) || 30;
-    const aowPct = Math.max(0, Math.min(100, (50 - formData.yearsAbroad) * 2));
-    const aowShortfall = Math.round((1 - aowPct / 100) * 1637);
-    const aowMonthly = Math.round(1637 * aowPct / 100);
-    const yearsInNL = 50 - formData.yearsAbroad;
-    const equity = formData.propertyValue - formData.mortgageBalance;
-    const p3Room = formData.jaarruimte + formData.reserveringsruimte;
-    const p3RefundLow = Math.round(p3Room * 0.37);
-    const p3RefundHigh = Math.round(p3Room * 0.495);
-    const bridgeYrs = Math.max(0, Math.round((67.25 - formData.targetRetirementAge) * 10) / 10);
-    const bridgeCost = Math.round(bridgeYrs * 12 * formData.desiredMonthlyIncome);
-    const stockValue = formData.cryptoValueDec31 + (formData.investmentAmount || 0);
-    const totalBox3 = formData.savingsBalance + formData.cryptoValueDec31;
-    const fictitiousTax = Math.max(0, Math.round(0.36 * (stockValue * 0.06 + formData.savingsBalance * 0.0144) - (formData.hasSpouse ? 114000 : 57000) * 0.0144 * 0.36));
-    const p2Monthly = Math.round(formData.builtUpPension / 12);
-    const p2Coverage = formData.desiredMonthlyIncome > 0 ? Math.min(100, Math.round((p2Monthly / formData.desiredMonthlyIncome) * 100)) : 0;
-    const yearsToFire = Math.max(0, formData.targetRetirementAge - age);
-    const inflationMultiplier = Math.pow(1.022, yearsToFire);
-    const futureMonthlyNeed = Math.round(formData.desiredMonthlyIncome * inflationMultiplier);
-    const taxLeakAnnual = fictitiousTax;
-    const isWealthLeaking = taxLeakAnnual > 2000;
+    const tp = translations[language];
+    const dateStr = new Date().toLocaleDateString(language === 'nl' ? 'nl-NL' : 'en-GB', { year: 'numeric', month: 'long', day: 'numeric' });
+
+    // Use shared financial calculations instead of duplicating them
+    const derived = computeDerivedValues(formData);
+    const {
+      age, aowPct, aowShortfall, aowMonthly, yearsInNL, equity,
+      netWealth, p3Room, p3RefundLow, p3RefundHigh, bridgeYrs, bridgeCost,
+      totalBox3, fictitiousTax, p2Monthly, p2Coverage, yearsToFire,
+      futureMonthlyNeed, taxLeakAnnual, isWealthLeaking,
+    } = derived;
     const isAchievable = metrics.gapToFill < netWealth * 0.8;
 
     // Parse markdown tables into HTML tables 
@@ -399,352 +480,654 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph about y
       { flag: '🇲🇾', name: 'Malaysia', tax: 'Territorial', benefit: 'MM2H visa program' },
     ];
 
+    // ---- Data-Storytelling computed values ----
+    // Health Score: composite 0-100 from four pillars
+    const healthAow = Math.round(aowPct);
+    const healthP2  = Math.round(p2Coverage);
+    const healthWealth = Math.min(100, Math.round((netWealth / Math.max(1, metrics.targetNestEgg)) * 100));
+    const healthTax = isWealthLeaking ? Math.max(0, 100 - Math.round(taxLeakAnnual / 200)) : 100;
+    const healthScore = Math.round((healthAow * 0.25) + (healthP2 * 0.25) + (healthWealth * 0.25) + (healthTax * 0.25));
+    // Wealth Leak Meter: 0-100 scale (capped at €10k/yr)
+    const leakPct = Math.min(100, Math.round((taxLeakAnnual / 10000) * 100));
+    // Income Stack: monthly sources
+    const incomeGap = Math.max(0, formData.desiredMonthlyIncome - aowMonthly - p2Monthly);
+    const totalIncome = aowMonthly + p2Monthly + incomeGap;
+    const aowBarPct = totalIncome > 0 ? Math.round((aowMonthly / totalIncome) * 100) : 0;
+    const p2BarPct  = totalIncome > 0 ? Math.round((p2Monthly / totalIncome) * 100) : 0;
+    const gapBarPct = totalIncome > 0 ? Math.round((incomeGap / totalIncome) * 100) : 0;
+    // 2028 Stress Test: approximate new Box 3 actual returns tax
+    const currentBox3Tax = fictitiousTax;
+    const estimated2028Tax = Math.round(totalBox3 > (formData.hasSpouse ? 114000 : 57000)
+      ? (totalBox3 - (formData.hasSpouse ? 114000 : 57000)) * 0.36
+      : 0);
+    const taxDelta = estimated2028Tax - currentBox3Tax;
+    // Monthly cost of inaction (tax leak / 12)
+    const monthlyLeakCost = Math.round(taxLeakAnnual / 12);
+    // Arrival age in NL for AOW timeline marker
+    const arrivalAgeNL = derived.arrivalAge || (age - yearsInNL);
+    // Freedom progress: how far towards target nest egg
+    const freedomPct = Math.min(100, Math.round((netWealth / Math.max(1, metrics.targetNestEgg)) * 100));
+    // Purchasing power multipliers for geo-arbitrage
+    const purchasingPower = { 'Portugal': 1.54, 'Italy': 1.32, 'Spain': 1.41, 'Malta': 1.25, 'Greece': 1.62, 'Cyprus': 1.18, 'Panama': 2.1, 'Costa Rica': 1.85, 'France': 1.05, 'Malaysia': 2.8 };
+    const visaTypes = { 'Portugal': 'D7 Visa', 'Italy': 'Elective Residency', 'Spain': 'Non-Lucrative Visa', 'Malta': 'Global Residence', 'Greece': 'D7 Visa', 'Cyprus': 'Category F', 'Panama': 'Pensionado Visa', 'Costa Rica': 'Pensionado', 'France': 'Long-Stay Visa', 'Malaysia': 'MM2H Visa' };
+    // SVG gauge helper: semi-circle arc path for 0-100 value
+    const gaugeArc = (pct) => {
+      const r = 70, cx = 100, cy = 90;
+      const clamp = Math.min(100, Math.max(0, pct));
+      const startAngle = Math.PI;
+      const endAngle = Math.PI + (Math.PI * clamp / 100);
+      const x1 = cx + r * Math.cos(startAngle), y1 = cy + r * Math.sin(startAngle);
+      const x2 = cx + r * Math.cos(endAngle), y2 = cy + r * Math.sin(endAngle);
+      return `M ${x1.toFixed(1)} ${y1.toFixed(1)} A ${r} ${r} 0 0 1 ${x2.toFixed(1)} ${y2.toFixed(1)}`;
+    };
+    // Needle helper: returns SVG line path for a speedometer needle at given pct
+    const needleAngle = (pct) => {
+      const angle = Math.PI + (Math.PI * Math.min(100, Math.max(0, pct)) / 100);
+      const r = 55, cx = 100, cy = 90;
+      const x = cx + r * Math.cos(angle), y = cy + r * Math.sin(angle);
+      return { x, y };
+    };
+
     // Build the full premium HTML template
     const htmlContent = `<!DOCTYPE html>
-<html lang="en">
+<html lang="${language}">
 <head>
 <meta charset="UTF-8">
-<title>ProsperPath - Premium Wealth Strategy Report</title>
+<title>${tp.pdf.pageTitle}</title>
 <style>
-  /* === GLOBAL === */
-  @page { margin: 1.5cm 2cm; size: A4; }
-  @media print { .page-break { page-break-before: always; } }
+  /* === RESET & GLOBAL === */
+  @page { margin: 1.2cm 1.8cm; size: A4; }
+  @media print { .page-break { page-break-before: always; } body { -webkit-print-color-adjust: exact; print-color-adjust: exact; } }
   * { box-sizing: border-box; margin: 0; padding: 0; }
-  body { font-family: 'Georgia', 'Times New Roman', serif; color: #e2e8f0; line-height: 1.7; background: #0f172a; }
-  .container { max-width: 780px; margin: 0 auto; padding: 0 32px; }
+  :root { --em: #10b981; --em-dk: #059669; --em-lt: #34d399; --or: #f59e0b; --or-lt: #fbbf24; --red: #ef4444; --red-lt: #fca5a5; --bl: #3b82f6; --bl-lt: #60a5fa; --pu: #8b5cf6; --bg: #0f172a; --bgc: rgba(30,41,59,0.55); --brd: #334155; --t1: #f1f5f9; --t2: #cbd5e1; --t3: #64748b; --t4: #475569; --sans: 'Segoe UI', system-ui, Arial, sans-serif; --serif: 'Georgia', 'Times New Roman', serif; }
+  body { font-family: var(--serif); color: var(--t2); line-height: 1.75; background: var(--bg); }
+  .c { max-width: 760px; margin: 0 auto; padding: 0 36px; }
+
+  /* === TYPOGRAPHY === */
+  h2 { font-family: var(--serif); font-size: 21px; color: var(--t1); border-left: 4px solid var(--em); padding-left: 16px; margin: 44px 0 14px; }
+  h3 { font-family: var(--sans); font-size: 13px; color: var(--em); margin: 18px 0 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; }
+  p { margin: 8px 0; font-size: 13px; color: var(--t2); font-family: var(--sans); line-height: 1.8; }
+  strong { color: var(--t1); }
+  ul { padding-left: 0; list-style: none; margin: 8px 0; }
+  li { margin: 5px 0; font-size: 13px; color: var(--t2); padding-left: 18px; position: relative; font-family: var(--sans); line-height: 1.7; }
+  li::before { content: "\u25B8"; color: var(--em); font-weight: bold; position: absolute; left: 0; }
 
   /* === FRONT PAGE === */
-  .front-page { background: linear-gradient(135deg, #0f172a 0%, #1e293b 50%, #0f172a 100%); min-height: 100vh; padding: 60px 0; position: relative; overflow: hidden; }
-  .front-page::before { content: ''; position: absolute; top: -50%; right: -30%; width: 600px; height: 600px; background: radial-gradient(circle, rgba(16,185,129,0.08) 0%, transparent 70%); border-radius: 50%; }
-  .fp-badge { display: inline-block; background: linear-gradient(135deg, #059669, #10b981); color: white; padding: 6px 20px; border-radius: 4px; font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; font-weight: 700; letter-spacing: 2px; text-transform: uppercase; margin-bottom: 24px; }
-  .fp-title { font-size: 36px; color: #f1f5f9; line-height: 1.2; margin-bottom: 8px; }
-  .fp-subtitle { font-size: 18px; color: #10b981; font-weight: 400; font-style: italic; margin-bottom: 40px; }
+  .fp { background: linear-gradient(160deg, #0f172a 0%, #1e293b 50%, #0f172a 100%); min-height: 100vh; padding: 50px 0 36px; position: relative; overflow: hidden; }
+  .fp::before { content: ''; position: absolute; top: -40%; right: -20%; width: 500px; height: 500px; background: radial-gradient(circle, rgba(16,185,129,0.06) 0%, transparent 70%); border-radius: 50%; }
+  .logo { font-family: var(--sans); font-size: 13px; font-weight: 800; letter-spacing: 3px; text-transform: uppercase; color: var(--em); margin-bottom: 4px; }
+  .badge { display: inline-block; background: linear-gradient(135deg, var(--em-dk), var(--em)); color: white; padding: 4px 16px; border-radius: 3px; font-family: var(--sans); font-size: 9px; font-weight: 700; letter-spacing: 2.5px; text-transform: uppercase; margin-bottom: 22px; }
+  .fp-title { font-size: 32px; color: var(--t1); line-height: 1.15; margin-bottom: 4px; }
+  .fp-sub { font-size: 15px; color: var(--em); font-style: italic; margin-bottom: 32px; }
 
-  /* Memo header */
-  .memo-header { background: rgba(30,41,59,0.6); border: 1px solid #334155; border-radius: 8px; padding: 20px 24px; margin-bottom: 36px; font-family: 'Segoe UI', Arial, sans-serif; }
-  .memo-row { display: flex; margin-bottom: 6px; font-size: 13px; }
-  .memo-label { color: #64748b; width: 80px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; flex-shrink: 0; }
-  .memo-value { color: #cbd5e1; }
+  /* Memo */
+  .memo { background: var(--bgc); border: 1px solid var(--brd); border-radius: 10px; padding: 20px 24px; margin-bottom: 28px; font-family: var(--sans); position: relative; }
+  .memo-r { display: flex; margin-bottom: 4px; font-size: 12px; }
+  .memo-l { color: var(--t3); width: 78px; font-weight: 700; text-transform: uppercase; letter-spacing: 1.2px; flex-shrink: 0; }
+  .memo-v { color: var(--t2); }
+  .arch-seal { position: absolute; right: 20px; bottom: 14px; width: 64px; height: 64px; border: 2px solid rgba(16,185,129,0.3); border-radius: 50%; display: flex; align-items: center; justify-content: center; text-align: center; font-family: var(--sans); font-size: 7px; font-weight: 700; color: var(--em-lt); text-transform: uppercase; letter-spacing: 0.5px; line-height: 1.2; }
+  .arch-seal::before { content: ''; position: absolute; inset: 3px; border: 1px solid rgba(16,185,129,0.2); border-radius: 50%; }
 
-  /* Six-tile summary */
-  .tile-grid { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 36px; }
-  .tile { background: rgba(30,41,59,0.7); border: 1px solid #334155; border-radius: 10px; padding: 20px 16px; text-align: center; position: relative; }
-  .tile .tile-label { font-family: 'Segoe UI', Arial, sans-serif; font-size: 10px; color: #64748b; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 8px; }
-  .tile .tile-value { font-size: 26px; font-weight: 700; color: #10b981; font-family: 'Segoe UI', Arial, sans-serif; }
-  .tile .tile-value.allocation { font-size: 16px; }
-  .tile .tile-sub { font-size: 11px; color: #64748b; margin-top: 4px; font-family: 'Segoe UI', Arial, sans-serif; }
+  /* Gauges */
+  .g3 { display: flex; gap: 14px; margin-bottom: 28px; }
+  .gc { flex: 1; background: var(--bgc); border: 1px solid var(--brd); border-radius: 12px; padding: 16px 10px 12px; text-align: center; }
+  .gc svg { display: block; margin: 0 auto 4px; }
+  .gc-l { font-family: var(--sans); font-size: 9px; color: var(--t3); text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; }
+  .gc-s { font-family: var(--sans); font-size: 10px; color: var(--t4); margin-top: 2px; }
 
-  /* Status indicators */
-  .status-bar { display: flex; gap: 12px; margin-bottom: 40px; }
-  .status-pill { display: inline-flex; align-items: center; gap: 8px; padding: 10px 18px; border-radius: 8px; font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px; font-weight: 600; }
-  .status-pill.leak { background: rgba(245,158,11,0.12); border: 1px solid rgba(245,158,11,0.3); color: #fbbf24; }
-  .status-pill.ok { background: rgba(16,185,129,0.12); border: 1px solid rgba(16,185,129,0.3); color: #34d399; }
-  .status-dot { width: 8px; height: 8px; border-radius: 50%; }
-  .status-dot.leak { background: #f59e0b; }
-  .status-dot.ok { background: #10b981; }
+  /* Tiles */
+  .tg { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px; margin-bottom: 24px; }
+  .ti { background: var(--bgc); border: 1px solid var(--brd); border-radius: 10px; padding: 16px 12px; text-align: center; }
+  .ti-l { font-family: var(--sans); font-size: 9px; color: var(--t3); text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 6px; }
+  .ti-v { font-size: 22px; font-weight: 800; color: var(--em); font-family: var(--sans); }
+  .ti-v.sm { font-size: 14px; font-weight: 700; }
+  .ti-s { font-size: 10px; color: var(--t4); margin-top: 2px; font-family: var(--sans); }
 
-  /* === SECTION STYLES === */
-  .section-divider { height: 1px; background: linear-gradient(to right, transparent, #334155, transparent); margin: 48px 0 32px; }
-  h2 { font-size: 22px; color: #f1f5f9; border-left: 4px solid #10b981; padding-left: 16px; margin: 40px 0 16px; font-family: 'Georgia', 'Times New Roman', serif; }
-  h3 { font-size: 15px; color: #10b981; margin: 20px 0 8px; font-family: 'Segoe UI', Arial, sans-serif; font-weight: 700; }
-  p { margin: 8px 0; font-size: 13.5px; color: #cbd5e1; font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.75; }
-  strong { color: #f1f5f9; }
-  ul { padding-left: 0; list-style: none; margin: 8px 0; }
-  li { margin: 6px 0; font-size: 13.5px; color: #cbd5e1; padding-left: 20px; position: relative; font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; }
-  li::before { content: "▸"; color: #10b981; font-weight: bold; position: absolute; left: 0; }
+  /* Pills */
+  .sb { display: flex; gap: 8px; flex-wrap: wrap; }
+  .pi { display: inline-flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 8px; font-family: var(--sans); font-size: 11px; font-weight: 600; }
+  .pi.w { background: rgba(245,158,11,0.1); border: 1px solid rgba(245,158,11,0.25); color: var(--or-lt); }
+  .pi.g { background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.25); color: var(--em-lt); }
+  .pi .d { width: 7px; height: 7px; border-radius: 50%; }
+  .pi.w .d { background: var(--or); }
+  .pi.g .d { background: var(--em); }
+
+  /* === SHARED === */
+  .sd { height: 1px; background: linear-gradient(to right, transparent, var(--brd), transparent); margin: 40px 0 24px; }
+  .dc { background: var(--bgc); border: 1px solid var(--brd); border-radius: 12px; padding: 20px 22px; margin: 16px 0; }
+  .dc.ac { border-color: var(--em); border-width: 2px; }
+  .dt { font-family: var(--sans); font-size: 11px; color: var(--t3); text-transform: uppercase; letter-spacing: 1.8px; font-weight: 700; margin-bottom: 10px; }
+  .dc .big { font-size: 28px; font-weight: 800; font-family: var(--sans); color: var(--em); }
+  .dc .big.w { color: var(--or); }
+  .dc .big.r { color: var(--red); }
+
+  /* Stacked bar */
+  .sb2 { display: flex; height: 34px; border-radius: 6px; overflow: hidden; margin: 12px 0 8px; }
+  .sb2 .s { display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: white; font-family: var(--sans); min-width: 28px; }
+  .s.eg { background: linear-gradient(90deg, var(--em-dk), var(--em)); }
+  .s.bl { background: linear-gradient(90deg, var(--bl), var(--bl-lt)); }
+  .s.og { background: linear-gradient(90deg, #b45309, var(--or)); }
+  .s.pu { background: linear-gradient(90deg, var(--pu), #a78bfa); }
+  .s.mu { background: #334155; color: var(--t3); }
+  .s.ht { background: repeating-linear-gradient(45deg, #334155, #334155 4px, #1e293b 4px, #1e293b 8px); color: var(--t3); }
+
+  /* Progress */
+  .pr { display: flex; align-items: center; gap: 16px; margin: 12px 0; }
+  .pt { flex: 1; height: 10px; background: #1e293b; border-radius: 5px; overflow: hidden; }
+  .pf { height: 100%; border-radius: 5px; }
+  .pf.g { background: linear-gradient(90deg, var(--em), var(--em-lt)); }
+  .pf.b { background: linear-gradient(90deg, var(--bl), var(--bl-lt)); }
+  .pv { font-family: var(--sans); font-size: 24px; font-weight: 800; color: var(--em); min-width: 60px; text-align: right; }
+
+  /* Badges */
+  .br { display: flex; gap: 7px; margin: 8px 0; flex-wrap: wrap; }
+  .bd { display: inline-block; padding: 4px 11px; border-radius: 20px; font-family: var(--sans); font-size: 10px; font-weight: 700; }
+  .bd.r { background: rgba(239,68,68,0.12); color: #fca5a5; border: 1px solid rgba(239,68,68,0.25); }
+  .bd.g { background: rgba(16,185,129,0.12); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.25); }
+  .bd.a { background: rgba(245,158,11,0.12); color: #fde68a; border: 1px solid rgba(245,158,11,0.25); }
+  .bd.b { background: rgba(96,165,250,0.12); color: #93c5fd; border: 1px solid rgba(96,165,250,0.25); }
+
+  /* Before/After */
+  .cr { display: flex; gap: 12px; margin: 14px 0; }
+  .cb { flex: 1; border-radius: 10px; padding: 14px; text-align: center; }
+  .cb.bf { background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.2); }
+  .cb.af { background: rgba(16,185,129,0.06); border: 1px solid rgba(16,185,129,0.2); }
+  .cb .cl { font-family: var(--sans); font-size: 9px; text-transform: uppercase; letter-spacing: 1.4px; font-weight: 700; margin-bottom: 5px; }
+  .cb.bf .cl { color: #fca5a5; }
+  .cb.af .cl { color: #6ee7b7; }
+  .cb .cv { font-size: 19px; font-weight: 800; font-family: var(--sans); }
+  .cb.bf .cv { color: #f87171; }
+  .cb.af .cv { color: var(--em-lt); }
+  .cb .cd { font-size: 10px; color: var(--t4); margin-top: 2px; font-family: var(--sans); }
+
+  /* Waterfall rows */
+  .wf { margin: 14px 0; }
+  .wr { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+  .wl { font-family: var(--sans); font-size: 10px; color: var(--t3); width: 105px; text-align: right; flex-shrink: 0; }
+  .wt { flex: 1; height: 24px; background: #1e293b; border-radius: 4px; overflow: hidden; }
+  .wb { height: 100%; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-family: var(--sans); font-size: 9px; font-weight: 700; color: white; }
+  .wb.g { background: linear-gradient(90deg, var(--em-dk), var(--em)); }
+  .wb.b { background: linear-gradient(90deg, var(--bl), var(--bl-lt)); }
+  .wb.o { background: linear-gradient(90deg, #b45309, var(--or)); }
+  .wb.p { background: linear-gradient(90deg, var(--pu), #a78bfa); }
+  .wb.a { background: linear-gradient(90deg, var(--or), var(--or-lt)); }
+  .wa { font-family: var(--sans); font-size: 10px; font-weight: 700; color: var(--t2); min-width: 65px; }
 
   /* Callouts */
-  .callout-warning { background: rgba(245,158,11,0.08); border-left: 4px solid #f59e0b; padding: 14px 18px; border-radius: 6px; margin: 16px 0; font-size: 13px; color: #fde68a; font-family: 'Segoe UI', Arial, sans-serif; }
+  .co { border-radius: 8px; padding: 14px 18px; margin: 16px 0; font-size: 12px; font-family: var(--sans); line-height: 1.7; }
+  .co.cw { background: rgba(245,158,11,0.07); border-left: 4px solid var(--or); color: #fde68a; }
+  .co.ci { background: rgba(96,165,250,0.07); border-left: 4px solid var(--bl); color: #93c5fd; }
+  .co.cs { background: rgba(16,185,129,0.07); border-left: 4px solid var(--em); color: #6ee7b7; }
+  .co.cr { background: rgba(239,68,68,0.07); border-left: 4px solid var(--red); color: var(--red-lt); }
 
-  /* Data cards */
-  .data-card { background: rgba(30,41,59,0.5); border: 1px solid #334155; border-radius: 10px; padding: 20px; margin: 16px 0; }
-  .data-card-title { font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px; color: #64748b; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 10px; }
-  .data-card .big-number { font-size: 32px; font-weight: 700; color: #10b981; font-family: 'Segoe UI', Arial, sans-serif; }
-  .data-card .big-number.warning { color: #f59e0b; }
-  .data-card .big-number.danger { color: #ef4444; }
-  .data-card .big-number.blue { color: #60a5fa; }
+  /* Destination cards */
+  .dg { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; }
+  .de { background: var(--bgc); border: 1px solid var(--brd); border-radius: 10px; padding: 14px 16px; }
+  .de .dh { display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px; }
+  .de .dn { font-family: var(--sans); font-size: 13px; font-weight: 700; color: var(--t1); }
+  .de .df { font-size: 18px; }
+  .de .dx { font-family: var(--sans); font-size: 11px; color: var(--em); font-weight: 600; margin-bottom: 4px; }
+  .de .db { font-family: var(--sans); font-size: 10px; color: var(--t4); }
+  .de .dv { display: inline-block; margin-top: 5px; padding: 2px 8px; border-radius: 4px; font-family: var(--sans); font-size: 8px; font-weight: 700; background: rgba(96,165,250,0.12); color: #93c5fd; border: 1px solid rgba(96,165,250,0.2); letter-spacing: 0.5px; }
+  .de .dp { font-family: var(--sans); font-size: 10px; color: var(--em-lt); font-weight: 700; margin-top: 5px; }
+  .de .ck { font-family: var(--sans); font-size: 9px; color: var(--t3); margin-top: 4px; }
+  .de .ck span { display: block; margin: 1px 0; }
+  .de .mg { margin-top: 5px; height: 4px; background: #1e293b; border-radius: 3px; overflow: hidden; }
+  .de .mf { height: 100%; border-radius: 3px; background: linear-gradient(90deg, var(--em), var(--em-lt)); }
 
-  /* Accrual timeline bar */
-  .timeline-bar { display: flex; height: 28px; border-radius: 6px; overflow: hidden; margin: 12px 0 8px; }
-  .timeline-filled { background: linear-gradient(90deg, #059669, #10b981); display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: white; font-family: 'Segoe UI', Arial, sans-serif; }
-  .timeline-gap { background: #334155; display: flex; align-items: center; justify-content: center; font-size: 10px; font-weight: 700; color: #64748b; font-family: 'Segoe UI', Arial, sans-serif; }
+  /* Triage board */
+  .tr-board { counter-reset: triage; margin: 16px 0; }
+  .tr-item { display: flex; gap: 14px; align-items: flex-start; padding: 14px 16px; background: var(--bgc); border: 1px solid var(--brd); border-radius: 10px; margin-bottom: 10px; }
+  .tr-num { font-family: var(--sans); font-size: 22px; font-weight: 800; color: var(--em); min-width: 32px; }
+  .tr-item.urgent .tr-num { color: var(--or); }
+  .tr-item.critical .tr-num { color: var(--red); }
+  .tr-body { flex: 1; }
+  .tr-tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-family: var(--sans); font-size: 8px; font-weight: 700; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 4px; }
+  .tr-tag.now { background: rgba(239,68,68,0.15); color: var(--red-lt); }
+  .tr-tag.soon { background: rgba(245,158,11,0.15); color: #fde68a; }
+  .tr-tag.plan { background: rgba(96,165,250,0.15); color: #93c5fd; }
+  .tr-tag.legal { background: rgba(139,92,246,0.15); color: #c4b5fd; }
+  .tr-title { font-family: var(--sans); font-size: 13px; font-weight: 700; color: var(--t1); }
+  .tr-desc { font-family: var(--sans); font-size: 11px; color: var(--t2); margin-top: 3px; line-height: 1.6; }
 
-  /* Gauge */
-  .gauge-row { display: flex; align-items: center; gap: 24px; margin: 16px 0; }
-  .gauge-track { flex: 1; height: 10px; background: #1e293b; border-radius: 5px; overflow: hidden; }
-  .gauge-fill { height: 100%; border-radius: 5px; background: linear-gradient(90deg, #10b981, #34d399); }
-  .gauge-label { font-family: 'Segoe UI', Arial, sans-serif; font-size: 28px; font-weight: 700; color: #10b981; min-width: 70px; text-align: right; }
-
-  /* Badge */
-  .badge-row { display: flex; gap: 10px; margin: 12px 0; flex-wrap: wrap; }
-  .badge { display: inline-block; padding: 5px 14px; border-radius: 20px; font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; font-weight: 700; }
-  .badge.red { background: rgba(239,68,68,0.15); color: #fca5a5; border: 1px solid rgba(239,68,68,0.3); }
-  .badge.green { background: rgba(16,185,129,0.15); color: #6ee7b7; border: 1px solid rgba(16,185,129,0.3); }
-  .badge.amber { background: rgba(245,158,11,0.15); color: #fde68a; border: 1px solid rgba(245,158,11,0.3); }
-  .badge.blue { background: rgba(96,165,250,0.15); color: #93c5fd; border: 1px solid rgba(96,165,250,0.3); }
-
-  /* Before-After comparison */
-  .comparison-row { display: flex; gap: 16px; margin: 16px 0; }
-  .comparison-box { flex: 1; border-radius: 10px; padding: 18px; text-align: center; }
-  .comparison-box.before { background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.25); }
-  .comparison-box.after { background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); }
-  .comparison-box .cb-label { font-family: 'Segoe UI', Arial, sans-serif; font-size: 10px; text-transform: uppercase; letter-spacing: 1.5px; font-weight: 700; margin-bottom: 8px; }
-  .comparison-box.before .cb-label { color: #fca5a5; }
-  .comparison-box.after .cb-label { color: #6ee7b7; }
-  .comparison-box .cb-value { font-size: 22px; font-weight: 700; font-family: 'Segoe UI', Arial, sans-serif; }
-  .comparison-box.before .cb-value { color: #f87171; }
-  .comparison-box.after .cb-value { color: #34d399; }
-  .comparison-box .cb-desc { font-size: 11px; color: #64748b; margin-top: 4px; font-family: 'Segoe UI', Arial, sans-serif; }
-
-  /* Country cards */
-  .country-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 16px 0; }
-  .country-card { background: rgba(30,41,59,0.5); border: 1px solid #334155; border-radius: 8px; padding: 14px; }
-  .country-card .cc-name { font-size: 14px; font-weight: 700; color: #f1f5f9; margin-bottom: 6px; font-family: 'Segoe UI', Arial, sans-serif; }
-  .country-card .cc-tax { font-size: 11px; color: #10b981; font-family: 'Segoe UI', Arial, sans-serif; }
-  .country-card .cc-benefit { font-size: 11px; color: #64748b; margin-top: 2px; font-family: 'Segoe UI', Arial, sans-serif; }
-
-  /* Bridge Gantt */
-  .gantt-bar-container { margin: 16px 0; }
-  .gantt-row { display: flex; align-items: center; gap: 12px; margin-bottom: 8px; }
-  .gantt-label { font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; color: #94a3b8; width: 90px; text-align: right; flex-shrink: 0; }
-  .gantt-track { flex: 1; height: 22px; background: #1e293b; border-radius: 4px; position: relative; overflow: hidden; }
-  .gantt-fill { height: 100%; border-radius: 4px; display: flex; align-items: center; justify-content: center; font-size: 9px; font-weight: 700; color: white; font-family: 'Segoe UI', Arial, sans-serif; }
-  .gantt-fill.savings { background: linear-gradient(90deg, #10b981, #34d399); }
-  .gantt-fill.lijfrente { background: linear-gradient(90deg, #3b82f6, #60a5fa); }
-  .gantt-fill.p2 { background: linear-gradient(90deg, #8b5cf6, #a78bfa); }
-  .gantt-fill.aow { background: linear-gradient(90deg, #f59e0b, #fbbf24); }
-
-  /* Tables */
-  table { width: 100%; border-collapse: collapse; margin: 16px 0; font-family: 'Segoe UI', Arial, sans-serif; font-size: 12px; }
-  th { background: #1e293b; color: #94a3b8; padding: 10px 14px; text-align: left; font-weight: 700; text-transform: uppercase; font-size: 10px; letter-spacing: 1px; border-bottom: 2px solid #334155; }
-  td { padding: 10px 14px; border-bottom: 1px solid #1e293b; color: #cbd5e1; }
-  tr:nth-child(even) td { background: rgba(30,41,59,0.3); }
+  /* Inaction footer */
+  .inaction { background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.2); border-radius: 10px; padding: 16px 20px; margin: 28px 0 0; text-align: center; }
+  .inaction .ia-title { font-family: var(--sans); font-size: 10px; text-transform: uppercase; letter-spacing: 2px; font-weight: 700; color: var(--red-lt); margin-bottom: 6px; }
+  .inaction .ia-big { font-family: var(--sans); font-size: 26px; font-weight: 800; color: #f87171; }
+  .inaction .ia-sub { font-family: var(--sans); font-size: 11px; color: var(--t3); margin-top: 4px; }
 
   /* Seal */
-  .verified-seal { display: inline-flex; align-items: center; gap: 6px; background: rgba(16,185,129,0.1); border: 1px solid rgba(16,185,129,0.3); padding: 6px 14px; border-radius: 20px; font-family: 'Segoe UI', Arial, sans-serif; font-size: 11px; font-weight: 600; color: #34d399; margin: 8px 0; }
+  .seal { display: inline-flex; align-items: center; gap: 5px; background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); padding: 4px 11px; border-radius: 20px; font-family: var(--sans); font-size: 10px; font-weight: 600; color: var(--em-lt); }
 
-  /* Footer & Disclaimer */
-  .disclaimer { background: rgba(30,41,59,0.5); border: 1px solid #334155; border-radius: 8px; padding: 18px 22px; margin-top: 48px; font-size: 11px; color: #64748b; font-family: 'Segoe UI', Arial, sans-serif; line-height: 1.7; }
-  .disclaimer strong { color: #94a3b8; }
-  .report-footer { text-align: center; margin-top: 40px; padding-top: 24px; border-top: 1px solid #1e293b; color: #475569; font-size: 11px; font-family: 'Segoe UI', Arial, sans-serif; }
-  .report-footer .brand { color: #10b981; font-weight: 700; }
+  /* Tables */
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-family: var(--sans); font-size: 11px; }
+  th { background: #1e293b; color: var(--t3); padding: 8px 10px; text-align: left; font-weight: 700; text-transform: uppercase; font-size: 9px; letter-spacing: 1px; border-bottom: 2px solid var(--brd); }
+  td { padding: 8px 10px; border-bottom: 1px solid #1e293b; color: var(--t2); }
+  tr:nth-child(even) td { background: rgba(30,41,59,0.2); }
+
+  /* Shield icon */
+  .shield-icon { display: inline-block; width: 32px; height: 36px; position: relative; }
+  .shield-icon svg { width: 100%; height: 100%; }
+
+  /* Disclaimer & Footer */
+  .disc { background: var(--bgc); border: 1px solid var(--brd); border-radius: 10px; padding: 18px 22px; margin-top: 48px; font-size: 10px; color: var(--t3); font-family: var(--sans); line-height: 1.7; }
+  .disc strong { color: var(--t4); }
+  .ft { text-align: center; margin-top: 32px; padding-top: 20px; border-top: 1px solid #1e293b; color: var(--t4); font-size: 10px; font-family: var(--sans); }
+  .ft .b { color: var(--em); font-weight: 800; letter-spacing: 1px; }
 </style>
 </head>
 <body>
 
-<!-- ============ FRONT PAGE ============ -->
-<div class="front-page">
-  <div class="container">
-    <div class="fp-badge">WEALTH STRATEGY</div>
-    <h1 class="fp-title">Wealth Protection &amp;<br>Early Retirement Roadmap</h1>
-    <p class="fp-subtitle">2026 Dutch FIRE &amp; International Tax Strategy</p>
+<!-- ======== PAGE 1 : WEALTH TRIAGE DASHBOARD ======== -->
+<div class="fp">
+  <div class="c">
+    <div class="logo">VrijWealth</div>
+    <div class="badge">${tp.pdf.reportBadge}</div>
+    <h1 class="fp-title">${tp.pdf.dashboardTitle}</h1>
+    <p class="fp-sub">${tp.pdf.dashboardSub}</p>
 
-    <!-- Memo Header -->
-    <div class="memo-header">
-      <div class="memo-row"><span class="memo-label">Date</span><span class="memo-value">${dateStr}</span></div>
-      <div class="memo-row"><span class="memo-label">To</span><span class="memo-value">${formData.fullName || 'Client'} — ${formData.hasSpouse ? 'Household' : 'Individual'}, Age ${formData.age}</span></div>
-      <div class="memo-row"><span class="memo-label">From</span><span class="memo-value">Senior Dutch &amp; International Wealth Architect</span></div>
-      <div class="memo-row"><span class="memo-label">Subject</span><span class="memo-value">Personalized Wealth Protection &amp; FIRE Strategy — Target Age ${formData.targetRetirementAge}</span></div>
+    <!-- Memorandum with Architect Seal -->
+    <div class="memo">
+      <div class="memo-r"><span class="memo-l">${tp.pdf.memoDate}</span><span class="memo-v">${dateStr}</span></div>
+      <div class="memo-r"><span class="memo-l">${tp.pdf.memoTo}</span><span class="memo-v">${formData.fullName || tp.pdf.clientFallback} — ${formData.hasSpouse ? tp.pdf.householdLabel : tp.pdf.individual}, ${tp.pdf.agePrefix} ${formData.age}</span></div>
+      <div class="memo-r"><span class="memo-l">${tp.pdf.memoFrom}</span><span class="memo-v">${tp.pdf.fromValue}</span></div>
+      <div class="memo-r"><span class="memo-l">${tp.pdf.memoRe}</span><span class="memo-v">${tp.pdf.reValue} ${formData.targetRetirementAge}</span></div>
+      <div class="arch-seal">${tp.pdf.sealLine1}<br>${tp.pdf.sealLine2}<br>${tp.pdf.sealLine3}<br>✓</div>
     </div>
 
-    <!-- Six-Tile Summary -->
-    <div class="tile-grid">
-      <div class="tile">
-        <div class="tile-label">Monthly Need (Future)</div>
-        <div class="tile-value">&euro;${futureMonthlyNeed.toLocaleString()}</div>
-        <div class="tile-sub">&euro;${formData.desiredMonthlyIncome.toLocaleString()} today</div>
+    <!-- Gauge Trio: Speedometer + Leak + Freedom -->
+    <div class="g3">
+      <!-- Health Speedometer -->
+      <div class="gc">
+        <svg viewBox="0 0 200 120" width="160" height="95">
+          <!-- Background track -->
+          <path d="M 30 90 A 70 70 0 0 1 170 90" fill="none" stroke="#1e293b" stroke-width="14" stroke-linecap="round"/>
+          <!-- Colored zone ticks -->
+          <path d="M 30 90 A 70 70 0 0 1 78.4 23.4" fill="none" stroke="rgba(239,68,68,0.3)" stroke-width="14" stroke-linecap="round"/>
+          <path d="M 78.4 23.4 A 70 70 0 0 1 141.1 33.4" fill="none" stroke="rgba(245,158,11,0.25)" stroke-width="14"/>
+          <path d="M 141.1 33.4 A 70 70 0 0 1 170 90" fill="none" stroke="rgba(16,185,129,0.25)" stroke-width="14" stroke-linecap="round"/>
+          <!-- Active score arc -->
+          <path d="${gaugeArc(healthScore)}" fill="none" stroke="${healthScore >= 60 ? '#10b981' : healthScore >= 35 ? '#f59e0b' : '#ef4444'}" stroke-width="14" stroke-linecap="round"/>
+          <!-- Score text -->
+          <text x="100" y="80" text-anchor="middle" font-size="32" font-weight="800" fill="${healthScore >= 60 ? '#10b981' : healthScore >= 35 ? '#f59e0b' : '#ef4444'}" font-family="Segoe UI, Arial, sans-serif">${healthScore}</text>
+          <text x="100" y="98" text-anchor="middle" font-size="9" fill="#64748b" font-family="Segoe UI, Arial, sans-serif">/ 100</text>
+          <!-- Labels -->
+          <text x="28" y="105" font-size="7" fill="#ef4444" font-family="Segoe UI, Arial, sans-serif">0</text>
+          <text x="172" y="105" text-anchor="end" font-size="7" fill="#10b981" font-family="Segoe UI, Arial, sans-serif">100</text>
+        </svg>
+        <div class="gc-l">${tp.pdf.healthScore}</div>
+        <div class="gc-s">${healthScore >= 70 ? tp.pdf.strong : healthScore >= 45 ? tp.pdf.moderate : tp.pdf.needsAttention}</div>
       </div>
-      <div class="tile">
-        <div class="tile-label">Target Nest Egg</div>
-        <div class="tile-value">&euro;${metrics.targetNestEgg.toLocaleString()}</div>
-        <div class="tile-sub">at 4% SWR</div>
+
+      <!-- Wealth Leak Speedometer with Needle -->
+      <div class="gc" style="border-color:${taxLeakAnnual > 4000 ? 'rgba(239,68,68,0.35)' : 'var(--brd)'};">
+        <svg viewBox="0 0 200 120" width="160" height="95">
+          <!-- Background track -->
+          <path d="M 30 90 A 70 70 0 0 1 170 90" fill="none" stroke="#1e293b" stroke-width="14" stroke-linecap="round"/>
+          <!-- Green zone: 0-40% -->
+          <path d="M 30 90 A 70 70 0 0 1 78.4 23.4" fill="none" stroke="#10b981" stroke-width="13" stroke-linecap="round"/>
+          <!-- Yellow zone: 40-70% -->
+          <path d="M 78.4 23.4 A 70 70 0 0 1 141.1 33.4" fill="none" stroke="#f59e0b" stroke-width="13"/>
+          <!-- Red zone: 70-100% -->
+          <path d="M 141.1 33.4 A 70 70 0 0 1 170 90" fill="none" stroke="#ef4444" stroke-width="13" stroke-linecap="round"/>
+          <!-- Needle -->
+          <line x1="100" y1="90" x2="${needleAngle(leakPct).x}" y2="${parseFloat(needleAngle(leakPct).y) + 5}" stroke="${taxLeakAnnual > 4000 ? '#ef4444' : taxLeakAnnual > 2000 ? '#f59e0b' : '#10b981'}" stroke-width="3" stroke-linecap="round"/>
+          <circle cx="100" cy="90" r="6" fill="${taxLeakAnnual > 4000 ? '#ef4444' : taxLeakAnnual > 2000 ? '#f59e0b' : '#10b981'}"/>
+          <circle cx="100" cy="90" r="3" fill="#0f172a"/>
+          <!-- Value -->
+          <text x="100" y="75" text-anchor="middle" font-size="16" font-weight="800" fill="${taxLeakAnnual > 4000 ? '#ef4444' : taxLeakAnnual > 2000 ? '#f59e0b' : '#10b981'}" font-family="Segoe UI, Arial, sans-serif">&euro;${taxLeakAnnual.toLocaleString()}</text>
+          <text x="100" y="86" text-anchor="middle" font-size="8" fill="#64748b" font-family="Segoe UI, Arial, sans-serif">${tp.pdf.perYear}</text>
+          <!-- Labels -->
+          <text x="28" y="105" font-size="7" fill="#10b981" font-family="Segoe UI, Arial, sans-serif">${tp.pdf.safe}</text>
+          <text x="172" y="105" text-anchor="end" font-size="7" fill="#ef4444" font-family="Segoe UI, Arial, sans-serif">${tp.pdf.danger}</text>
+        </svg>
+        <div class="gc-l">${taxLeakAnnual > 4000 ? tp.pdf.wealthLeak : tp.pdf.wealthLeakMeter}</div>
+        <div class="gc-s" style="color:${taxLeakAnnual > 4000 ? '#fca5a5' : 'var(--t4)'};">${taxLeakAnnual > 4000 ? tp.pdf.redZone + ' \u2014 &euro;' + taxLeakAnnual.toLocaleString() + tp.pdf.yrDrain : isWealthLeaking ? tp.pdf.moderateDrag : tp.pdf.withinThreshold}</div>
       </div>
-      <div class="tile">
-        <div class="tile-label">Gap to Fill</div>
-        <div class="tile-value">&euro;${metrics.gapToFill.toLocaleString()}</div>
-        <div class="tile-sub">wealth shortfall</div>
-      </div>
-      <div class="tile">
-        <div class="tile-label">Monthly Savings Target</div>
-        <div class="tile-value">&euro;${metrics.monthlySavingsTarget.toLocaleString()}</div>
-        <div class="tile-sub">to reach FIRE</div>
-      </div>
-      <div class="tile">
-        <div class="tile-label">Asset Allocation</div>
-        <div class="tile-value allocation">${allocation.stocks}% / ${allocation.bonds}% / ${allocation.realEstate}% / ${allocation.cash}%</div>
-        <div class="tile-sub">Stocks / Bonds / RE / Cash</div>
-      </div>
-      <div class="tile">
-        <div class="tile-label">Current Net Wealth</div>
-        <div class="tile-value">&euro;${netWealth.toLocaleString()}</div>
-        <div class="tile-sub">total assets − liabilities</div>
+
+      <!-- Freedom Date + Progress Bar -->
+      <div class="gc">
+        <svg viewBox="0 0 200 115" width="155" height="88">
+          <text x="100" y="35" text-anchor="middle" font-size="28" font-weight="800" fill="#10b981" font-family="Segoe UI, Arial, sans-serif">${yearsToFire}${tp.pdf.yearSuffix}</text>
+          <text x="100" y="50" text-anchor="middle" font-size="9" fill="#64748b" font-family="Segoe UI, Arial, sans-serif">${tp.pdf.toFreedom}</text>
+          <!-- Progress bar: Today vs Target -->
+          <rect x="20" y="65" width="160" height="10" rx="5" fill="#1e293b"/>
+          <rect x="20" y="65" width="${Math.min(160, Math.round(160 * freedomPct / 100))}" height="10" rx="5" fill="url(#freedomGrad)"/>
+          <defs><linearGradient id="freedomGrad"><stop offset="0%" stop-color="#059669"/><stop offset="100%" stop-color="#34d399"/></linearGradient></defs>
+          <text x="20" y="90" font-size="8" fill="#64748b" font-family="Segoe UI, Arial, sans-serif">${tp.pdf.todayColon} &euro;${netWealth.toLocaleString()}</text>
+          <text x="180" y="90" text-anchor="end" font-size="8" fill="#10b981" font-family="Segoe UI, Arial, sans-serif">${tp.pdf.targetColon} &euro;${metrics.targetNestEgg.toLocaleString()}</text>
+          <text x="100" y="107" text-anchor="middle" font-size="10" font-weight="700" fill="var(--em)" font-family="Segoe UI, Arial, sans-serif">${freedomPct}% ${tp.pdf.funded}</text>
+        </svg>
+        <div class="gc-l">${tp.pdf.freedomGap}</div>
+        <div class="gc-s">${tp.pdf.agePrefix} ${age} → ${tp.pdf.agePrefix} ${formData.targetRetirementAge}</div>
       </div>
     </div>
 
-    <!-- Status Indicators -->
-    <div class="status-bar">
+    <!-- Six Metric Tiles -->
+    <div class="tg">
+      <div class="ti"><div class="ti-l">${tp.pdf.monthlyNeedFuture}</div><div class="ti-v">&euro;${futureMonthlyNeed.toLocaleString()}</div><div class="ti-s">&euro;${formData.desiredMonthlyIncome.toLocaleString()} ${tp.pdf.todayLabel}</div></div>
+      <div class="ti"><div class="ti-l">${tp.pdf.targetNestEgg}</div><div class="ti-v">&euro;${metrics.targetNestEgg.toLocaleString()}</div><div class="ti-s">${tp.pdf.at4SWR}</div></div>
+      <div class="ti"><div class="ti-l">${tp.pdf.gapToFill}</div><div class="ti-v">&euro;${metrics.gapToFill.toLocaleString()}</div><div class="ti-s">${tp.pdf.wealthShortfall}</div></div>
+      <div class="ti"><div class="ti-l">${tp.pdf.monthlySavings}</div><div class="ti-v">&euro;${metrics.monthlySavingsTarget.toLocaleString()}</div><div class="ti-s">${tp.pdf.toReachFire}</div></div>
+      <div class="ti"><div class="ti-l">${tp.pdf.allocationLabel}</div><div class="ti-v sm">${allocation.stocks}/${allocation.bonds}/${allocation.realEstate}/${allocation.cash}%</div><div class="ti-s">${tp.pdf.stockBondRECash}</div></div>
+      <div class="ti"><div class="ti-l">${tp.pdf.netWealth}</div><div class="ti-v">&euro;${netWealth.toLocaleString()}</div><div class="ti-s">${tp.pdf.assetsMinusLiab}</div></div>
+    </div>
+
+    <div class="sb">
       ${isWealthLeaking
-        ? '<div class="status-pill leak"><span class="status-dot leak"></span>Wealth Leak Alert — &euro;' + taxLeakAnnual.toLocaleString() + '/yr in Box 3 tax drag</div>'
-        : '<div class="status-pill ok"><span class="status-dot ok"></span>Low Tax Exposure — Box 3 drag within threshold</div>'
-      }
+        ? '<div class="pi w"><span class="d"></span>' + tp.pdf.wealthLeakPill + ' \u2014 &euro;' + taxLeakAnnual.toLocaleString() + '/' + (language === 'nl' ? 'jr' : 'yr') + '</div>'
+        : '<div class="pi g"><span class="d"></span>' + tp.pdf.lowTaxExposure + '</div>'}
       ${isAchievable
-        ? '<div class="status-pill ok"><span class="status-dot ok"></span>Path to Freedom ✓ Target is achievable</div>'
-        : '<div class="status-pill leak"><span class="status-dot leak"></span>Significant Gap — Strategy optimization critical</div>'
-      }
+        ? '<div class="pi g"><span class="d"></span>' + tp.pdf.pathToFreedom + '</div>'
+        : '<div class="pi w"><span class="d"></span>' + tp.pdf.gapOptNeeded + '</div>'}
     </div>
   </div>
 </div>
 
-<!-- ============ PILLAR 1: AOW ============ -->
+<!-- ======== PAGE 2 : INCOME FLOOR (PILLAR 1 & 2) ======== -->
 <div class="page-break"></div>
-<div class="container" style="padding-top: 48px;">
-  <h2>Pillar 1 — AOW &amp; State Pension: The Safety Floor</h2>
-  <p>Your baseline state pension security, accrued at 2% per year of NL residency.</p>
+<div class="c" style="padding-top:48px;">
+  <h2>${tp.pdf.pillar12Title}</h2>
+  <p>${tp.pdf.pillar12Desc}</p>
 
-  <div class="data-card">
-    <div class="data-card-title">AOW Accrual Timeline (50-Year Horizon)</div>
-    <div class="timeline-bar">
-      <div class="timeline-filled" style="width: ${aowPct}%">${yearsInNL} yrs in NL</div>
-      ${formData.yearsAbroad > 0 ? '<div class="timeline-gap" style="width: ' + (100 - aowPct) + '%">' + formData.yearsAbroad + ' yrs gap</div>' : ''}
+  <!-- Stacked Composition Chart -->
+  <div class="dc">
+    <div class="dt">${tp.pdf.retirementIncome67}</div>
+    <div class="sb2">
+      ${aowBarPct > 0 ? '<div class="s eg" style="width:' + aowBarPct + '%">' + tp.pdf.aowState + ' &euro;' + aowMonthly.toLocaleString() + '</div>' : ''}
+      ${p2BarPct > 0 ? '<div class="s bl" style="width:' + p2BarPct + '%">' + tp.pdf.p2Employer + ' &euro;' + p2Monthly.toLocaleString() + '</div>' : ''}
+      ${gapBarPct > 0 ? '<div class="s ht" style="width:' + gapBarPct + '%">' + tp.pdf.gapSelfFund + ' &euro;' + incomeGap.toLocaleString() + '</div>' : ''}
     </div>
-    <p style="font-size: 11px; color: #64748b;">Accrual: <strong>${aowPct}%</strong> of full AOW benefit. ${formData.yearsAbroad > 0 ? 'Gap of ' + formData.yearsAbroad + ' years abroad reduces your entitlement.' : ''}</p>
+    <div style="display:flex;justify-content:space-between;font-family:var(--sans);font-size:10px;color:var(--t3);">
+      <span>█ ${tp.pdf.aowState} &nbsp; █ ${tp.pdf.p2Employer} &nbsp; █ ${tp.pdf.gapSelfFund}</span>
+      <span>${tp.pdf.targetColon} &euro;${formData.desiredMonthlyIncome.toLocaleString()}${tp.pdf.targetMo}</span>
+    </div>
   </div>
 
-  <div class="data-card">
-    <div class="data-card-title">Projected Monthly AOW at Age 67</div>
-    <div class="big-number">&euro;${aowMonthly.toLocaleString()}/mo</div>
-    <p style="font-size: 12px; color: #64748b; margin-top: 6px;">${aowPct < 100 ? 'Shortfall: <strong style="color:#fbbf24;">€' + aowShortfall + '/mo</strong> vs full AOW (€1,637).' : 'Full AOW benefit secured.'}</p>
-    ${aowPct >= 100 ? '<div class="verified-seal">✓ 100% Accrual Verified</div>' : '<div class="badge-row"><span class="badge amber">⚠ ' + (100 - aowPct) + '% Accrual Gap</span></div>'}
+  <!-- AOW Accrual with Arrival Date -->
+  <div class="dc">
+    <div class="dt">${tp.pdf.aowTimeline}</div>
+    <div style="position:relative;">
+      <div class="sb2">
+        <div class="s eg" style="width:${aowPct}%">${yearsInNL} ${tp.pdf.yrsInNL}</div>
+        ${formData.yearsAbroad > 0 ? '<div class="s mu" style="width:' + (100 - aowPct) + '%">' + formData.yearsAbroad + ' ' + tp.pdf.yrsAbroad + '</div>' : ''}
+      </div>
+      <!-- Arrival marker -->
+      ${formData.yearsAbroad > 0 ? '<div style="position:absolute;top:-18px;left:' + (100 - aowPct) + '%;transform:translateX(-50%);font-family:var(--sans);font-size:8px;color:var(--em);font-weight:700;">' + tp.pdf.arrivedNL + ' ' + arrivalAgeNL + ') ▼</div>' : ''}
+    </div>
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-top:8px;">
+      <div>
+        <span style="font-family:var(--sans);font-size:26px;font-weight:800;color:var(--em);">&euro;${aowMonthly.toLocaleString()}</span>
+        <span style="font-family:var(--sans);font-size:11px;color:var(--t4);"> ${tp.pdf.moAt67}</span>
+      </div>
+      ${aowPct >= 100
+        ? '<div class="seal">✓ ' + tp.pdf.fullAccrual + '</div>'
+        : '<div class="bd a">⚠ ' + (100 - aowPct) + tp.pdf.gapPct + ' &euro;' + aowShortfall + tp.pdf.shortfallVsFull + '</div>'}
+    </div>
   </div>
-</div>
 
-<!-- ============ PILLAR 2: Employer Pension ============ -->
-<div class="container" style="padding-top: 16px;">
-  <div class="section-divider"></div>
-  <h2>Pillar 2 — Employer Pension: The Growth Engine</h2>
-  <p>Your workplace pension performance review.</p>
+  <div class="sd"></div>
 
-  <div class="data-card">
-    <div class="data-card-title">Annual Accrual (Factor A)</div>
-    <div class="big-number${formData.factorA === 0 ? ' warning' : ''}">&euro;${formData.factorA.toLocaleString()}</div>
-    <div class="badge-row" style="margin-top: 10px;">
+  <!-- Pillar 2 -->
+  <div class="dc">
+    <div class="dt">${tp.pdf.p2Coverage}</div>
+    <div class="pr">
+      <div class="pt"><div class="pf b" style="width:${p2Coverage}%"></div></div>
+      <div class="pv" style="color:var(--bl-lt);">${p2Coverage}%</div>
+    </div>
+    <p style="font-size:11px;color:var(--t4);">${tp.pdf.builtUpColon} <strong>&euro;${formData.builtUpPension.toLocaleString()}${tp.pdf.yrLabel}</strong> (&euro;${p2Monthly.toLocaleString()}${tp.pdf.moLabel}) ${tp.pdf.covers} ${p2Coverage}% ${tp.pdf.ofWord} &euro;${formData.desiredMonthlyIncome.toLocaleString()}${tp.pdf.moLabel}.</p>
+    <div class="br" style="margin-top:8px;">
       ${formData.factorA === 0
-        ? '<span class="badge red">✗ Missed Opportunity — No Employer Accrual</span><span class="badge green">✓ Unlocked: Full Pillar 3 Room</span>'
-        : '<span class="badge green">✓ Active Employer Pension</span>'
-      }
+        ? '<span class="bd r">' + tp.pdf.noAccrual + '</span><span class="bd g">' + tp.pdf.fullP3Unlocked + '</span>'
+        : '<span class="bd g">' + tp.pdf.activeFactorA + ' &euro;' + formData.factorA.toLocaleString() + '</span>'}
     </div>
-  </div>
-
-  <div class="data-card">
-    <div class="data-card-title">Pillar 2 Coverage of Monthly Need</div>
-    <div class="gauge-row">
-      <div class="gauge-track"><div class="gauge-fill" style="width: ${p2Coverage}%"></div></div>
-      <div class="gauge-label">${p2Coverage}%</div>
-    </div>
-    <p style="font-size: 12px; color: #64748b;">Built-up: <strong>&euro;${formData.builtUpPension.toLocaleString()}/yr</strong> (&euro;${p2Monthly.toLocaleString()}/mo) covers ${p2Coverage}% of your &euro;${formData.desiredMonthlyIncome.toLocaleString()}/mo target.</p>
   </div>
 </div>
 
-<!-- ============ PILLAR 3: Tax Shield ============ -->
+<!-- ======== PAGE 3 : PILLAR 3 TAX SHIELD WATERFALL ======== -->
 <div class="page-break"></div>
-<div class="container" style="padding-top: 48px;">
-  <h2>Pillar 3 — Private Savings: The Tax Shield</h2>
-  <p>Your most powerful tool for reducing tax exposure and building tax-sheltered wealth.</p>
+<div class="c" style="padding-top:48px;">
+  <h2>${tp.pdf.pillar3Title}</h2>
+  <p>${tp.pdf.pillar3Desc}</p>
 
-  <div class="data-card" style="border-color: #10b981; border-width: 2px;">
-    <div class="data-card-title" style="color: #10b981;">Immediate Tax Refund Potential</div>
-    <div class="big-number">&euro;${p3RefundLow.toLocaleString()} — &euro;${p3RefundHigh.toLocaleString()}</div>
-    <p style="font-size: 12px; color: #94a3b8; margin-top: 6px;">By filling <strong>&euro;${p3Room.toLocaleString()}</strong> of Jaarruimte + Reserveringsruimte this year.</p>
-    <div class="badge-row"><span class="badge green">Claim 37–49.5% back</span><span class="badge blue">Box 3 → Tax-Exempt</span></div>
+  <!-- Waterfall: Gross → Refund → Net -->
+  <div class="dc ac">
+    <div class="dt" style="color:var(--em);">${tp.pdf.contributionWaterfall}</div>
+    <div class="wf">
+      <div class="wr">
+        <span class="wl">${tp.pdf.grossDeposit}</span>
+        <div class="wt"><div class="wb g" style="width:100%">&euro;${p3Room.toLocaleString()}</div></div>
+        <span class="wa">&euro;${p3Room.toLocaleString()}</span>
+      </div>
+      <div class="wr">
+        <span class="wl">${tp.pdf.taxRefund37}</span>
+        <div class="wt"><div class="wb a" style="width:${Math.round((p3RefundLow / Math.max(1, p3Room)) * 100)}%">−&euro;${p3RefundLow.toLocaleString()}</div></div>
+        <span class="wa" style="color:var(--em);">+&euro;${p3RefundLow.toLocaleString()}</span>
+      </div>
+      <div class="wr">
+        <span class="wl">${tp.pdf.taxRefund495}</span>
+        <div class="wt"><div class="wb a" style="width:${Math.round((p3RefundHigh / Math.max(1, p3Room)) * 100)}%">−&euro;${p3RefundHigh.toLocaleString()}</div></div>
+        <span class="wa" style="color:var(--em);">+&euro;${p3RefundHigh.toLocaleString()}</span>
+      </div>
+      <div class="wr">
+        <span class="wl">${tp.pdf.netCostBest}</span>
+        <div class="wt"><div class="wb b" style="width:${Math.round(((p3Room - p3RefundHigh) / Math.max(1, p3Room)) * 100)}%">&euro;${(p3Room - p3RefundHigh).toLocaleString()}</div></div>
+        <span class="wa">&euro;${(p3Room - p3RefundHigh).toLocaleString()}</span>
+      </div>
+    </div>
+    <div class="br"><span class="bd g">${tp.pdf.claimBack}</span><span class="bd b">${tp.pdf.box3ToExempt}</span></div>
   </div>
 
-  <div class="data-card">
-    <div class="data-card-title">Box 3 Transformation Map</div>
-    <div class="comparison-row">
-      <div class="comparison-box before">
-        <div class="cb-label">Before — Taxable Box 3</div>
-        <div class="cb-value">&euro;${totalBox3.toLocaleString()}</div>
-        <div class="cb-desc">Exposed to 36% fictional/actual returns tax</div>
+  <!-- Box 3 Shield Visual -->
+  <div class="dc">
+    <div class="dt">
+      <span class="shield-icon" style="vertical-align:middle;">
+        <svg viewBox="0 0 24 28" fill="none"><path d="M12 1L2 5v8c0 7.5 10 13 10 13s10-5.5 10-13V5L12 1z" fill="rgba(16,185,129,0.15)" stroke="#10b981" stroke-width="1.5"/><text x="12" y="18" text-anchor="middle" font-size="8" font-weight="800" fill="#10b981" font-family="Segoe UI, Arial, sans-serif">✓</text></svg>
+      </span>
+      ${tp.pdf.box3Shield}
+    </div>
+    <div class="cr">
+      <div class="cb bf">
+        <div class="cl">${tp.pdf.beforeTaxable}</div>
+        <div class="cv">&euro;${totalBox3.toLocaleString()}</div>
+        <div class="cd">${tp.pdf.fictTax36}</div>
       </div>
-      <div class="comparison-box after">
-        <div class="cb-label">After — Optimized</div>
-        <div class="cb-value">&euro;${Math.max(0, totalBox3 - p3Room - (formData.hasSpouse ? 114000 : 57000)).toLocaleString()}</div>
-        <div class="cb-desc">Below &euro;${formData.hasSpouse ? '114k' : '57k'} exemption + Pillar 3 shield</div>
+      <div class="cb af">
+        <div class="cl">${tp.pdf.afterShielded}</div>
+        <div class="cv">&euro;${Math.max(0, totalBox3 - p3Room - (formData.hasSpouse ? 114000 : 57000)).toLocaleString()}</div>
+        <div class="cd">${tp.pdf.belowLabel} &euro;${formData.hasSpouse ? '114k' : '57k'} ${tp.pdf.exemptPlus2028}</div>
+      </div>
+    </div>
+    <div class="co cs"><strong>${tp.pdf.shieldEffect}</strong> ${tp.pdf.shieldEffectText}</div>
+  </div>
+</div>
+
+<!-- ======== PAGE 4 : 2028 STRESS TEST "THE CLIFF" ======== -->
+<div class="page-break"></div>
+<div class="c" style="padding-top:48px;">
+  <h2>${tp.pdf.stressTitle}</h2>
+  <p>${tp.pdf.stressDesc}</p>
+
+  <div class="dc">
+    <div class="dt">${tp.pdf.currentVs2028}</div>
+    <svg viewBox="0 0 600 200" width="100%" style="display:block;margin:8px 0;">
+      <!-- Grid lines -->
+      <line x1="100" y1="20" x2="100" y2="160" stroke="#1e293b" stroke-width="1"/>
+      <line x1="100" y1="160" x2="550" y2="160" stroke="#334155" stroke-width="1"/>
+      <!-- Current bar -->
+      <rect x="140" y="${160 - Math.min(130, Math.max(10, currentBox3Tax / Math.max(1, Math.max(currentBox3Tax, estimated2028Tax)) * 130))}" width="100" height="${Math.min(130, Math.max(10, currentBox3Tax / Math.max(1, Math.max(currentBox3Tax, estimated2028Tax)) * 130))}" rx="4" fill="#10b981"/>
+      <text x="190" y="${155 - Math.min(130, Math.max(10, currentBox3Tax / Math.max(1, Math.max(currentBox3Tax, estimated2028Tax)) * 130))}" text-anchor="middle" font-size="13" font-weight="800" fill="#10b981" font-family="Segoe UI, Arial, sans-serif">&euro;${currentBox3Tax.toLocaleString()}</text>
+      <text x="190" y="178" text-anchor="middle" font-size="10" fill="#64748b" font-family="Segoe UI, Arial, sans-serif">${tp.pdf.currentBar}</text>
+      <!-- 2028 bar (THE CLIFF) -->
+      <rect x="310" y="${160 - Math.min(130, Math.max(10, estimated2028Tax / Math.max(1, Math.max(currentBox3Tax, estimated2028Tax)) * 130))}" width="100" height="${Math.min(130, Math.max(10, estimated2028Tax / Math.max(1, Math.max(currentBox3Tax, estimated2028Tax)) * 130))}" rx="4" fill="${estimated2028Tax > currentBox3Tax ? '#ef4444' : '#10b981'}"/>
+      <text x="360" y="${155 - Math.min(130, Math.max(10, estimated2028Tax / Math.max(1, Math.max(currentBox3Tax, estimated2028Tax)) * 130))}" text-anchor="middle" font-size="13" font-weight="800" fill="${estimated2028Tax > currentBox3Tax ? '#ef4444' : '#10b981'}" font-family="Segoe UI, Arial, sans-serif">&euro;${estimated2028Tax.toLocaleString()}</text>
+      <text x="360" y="178" text-anchor="middle" font-size="10" fill="#64748b" font-family="Segoe UI, Arial, sans-serif">${tp.pdf.est2028Bar}</text>
+      <!-- Delta arrow -->
+      ${taxDelta > 0 ? '<line x1="242" y1="80" x2="308" y2="80" stroke="#ef4444" stroke-width="2" stroke-dasharray="4,3"/><text x="275" y="72" text-anchor="middle" font-size="10" font-weight="700" fill="#ef4444" font-family="Segoe UI, Arial, sans-serif">+&euro;' + taxDelta.toLocaleString() + '</text>' : ''}
+    </svg>
+  </div>
+
+  <div class="co cr"><strong>${tp.pdf.warning}</strong> ${tp.pdf.warningText} <strong>&euro;${estimated2028Tax.toLocaleString()}${tp.pdf.yrLabel}</strong> ${tp.pdf.onTrajectory} ${taxDelta > 0 ? tp.pdf.thats + ' <strong>&euro;' + taxDelta.toLocaleString() + ' ' + tp.pdf.moreThanCurrent + '</strong>' : ''}</div>
+
+  <div class="sd"></div>
+
+  <h2>${tp.pdf.realEstateFamilyTitle}</h2>
+
+  ${formData.propertyValue > 0 ? '<div class="dc"><div class="dt">' + tp.pdf.propStrategy + '</div><div class="cr"><div class="cb bf"><div class="cl">' + tp.pdf.currentBox3Tax + '</div><div class="cv">&euro;' + fictitiousTax.toLocaleString() + tp.pdf.yrLabel + '</div><div class="cd">' + tp.pdf.taxOnExcess + '</div></div><div class="cb af"><div class="cl">' + tp.pdf.afterMortgageUpgrade + '</div><div class="cv">' + tp.pdf.reduced + '</div><div class="cd">' + tp.pdf.shiftsBox1 + '</div></div></div><p style="font-size:11px;color:var(--t4);">' + tp.pdf.hra2026 + ' <strong>37.56%</strong> ' + tp.pdf.in2026 + ' ' + tp.pdf.eigenwoningforfait + ' <strong>&euro;' + Math.round(formData.propertyValue * 0.0035).toLocaleString() + tp.pdf.yrLabel + '</strong> ' + tp.pdf.woz035 + '</p></div>' : ''}
+
+  ${formData.hasChildren ? '<div class="dc"><div class="dt">' + tp.pdf.familyWealthFlow + '</div><p style="font-size:12px;">' + tp.pdf.taxFreeGifting + ' <strong>&euro;6,908' + tp.pdf.perChildYr + '</strong> (&euro;13,816 ' + tp.pdf.fromPartners + ').<br>' + tp.pdf.oneTimeEnlarged + ' <strong>&euro;33,129</strong> ' + tp.pdf.perChild1840 + '<br>' + tp.pdf.schenkenText + '</p><div class="br"><span class="bd g">' + tp.pdf.annualShift + ' &euro;' + (formData.childrenCount * 6908).toLocaleString() + '</span><span class="bd b">' + formData.childrenCount + ' ' + (formData.childrenCount > 1 ? tp.pdf.childPl : tp.pdf.childSg) + '</span></div></div>' : ''}
+</div>
+
+<!-- ======== PAGE 5 : GEO-ARBITRAGE EXIT CATALOG ======== -->
+<div class="page-break"></div>
+<div class="c" style="padding-top:48px;">
+  <h2>${tp.pdf.geoTitle}</h2>
+  <p>${tp.pdf.geoDesc}</p>
+
+  <div class="dg">
+    ${countries.map(c => {
+      const pp = purchasingPower[c.name] || 1.0;
+      const localCost = Math.round(formData.desiredMonthlyIncome / pp);
+      const surplus = Math.min(95, Math.round(pp * 40));
+      const visa = visaTypes[c.name] || tp.pdf.residencyPermit;
+      return '<div class="de">' +
+        '<div class="dh"><span class="dn">' + c.flag + ' ' + c.name + '</span></div>' +
+        '<div class="dx">' + c.tax + '</div>' +
+        '<div class="db">' + c.benefit + '</div>' +
+        '<div class="dp">✔ &euro;' + formData.desiredMonthlyIncome.toLocaleString() + ' ' + tp.pdf.lifestyleEq + ' &euro;' + localCost.toLocaleString() + ' (' + pp + 'x ' + tp.pdf.powerSuffix + '</div>' +
+        '<div class="dv">' + visa + '</div>' +
+        '<div class="ck"><span>' + tp.pdf.taxRes + '</span><span>' + tp.pdf.healthAcc + '</span><span>' + tp.pdf.treatyBen + '</span></div>' +
+        '<div class="mg"><div class="mf" style="width:' + surplus + '%"></div></div>' +
+      '</div>';
+    }).join('')}
+  </div>
+</div>
+
+<!-- ======== PAGE 6 : BRIDGE PHASE DRAWDOWN ======== -->
+<div class="page-break"></div>
+<div class="c" style="padding-top:48px;">
+  <h2>${tp.pdf.bridgeTitle} ${formData.targetRetirementAge} ${tp.pdf.to67}</h2>
+  <p>${Math.round(bridgeYrs)} ${tp.pdf.selfFundedBridge} <strong>&euro;${bridgeCost.toLocaleString()}</strong>.</p>
+
+  <!-- Funding Waterfall Flowchart -->
+  <div class="dc">
+    <div class="dt">${tp.pdf.fundingWaterfall}</div>
+    <div class="wf">
+      <div class="wr">
+        <span class="wl">${tp.pdf.phase1}</span>
+        <div class="wt"><div class="wb g" style="width:${Math.min(100, 40)}%">${tp.pdf.taxFreeYrs} 1–${Math.min(Math.round(bridgeYrs * 0.4), Math.round(bridgeYrs))}</div></div>
+        <span class="wa">${tp.pdf.cashSavings}</span>
+      </div>
+      <div class="wr">
+        <span class="wl">${tp.pdf.phase2}</span>
+        <div class="wt"><div class="wb b" style="width:${Math.min(100, 35)}%">${tp.pdf.lowerBracketEff}</div></div>
+        <span class="wa">${tp.pdf.pillar3Lbl}</span>
+      </div>
+      <div class="wr">
+        <span class="wl">${tp.pdf.phase3}</span>
+        <div class="wt"><div class="wb a" style="width:100%">${tp.pdf.lifelongFloor67}</div></div>
+        <span class="wa">&euro;${(aowMonthly + p2Monthly).toLocaleString()}${tp.pdf.moLabel}</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="co ci"><strong>${tp.pdf.seqLogic}</strong> ${tp.pdf.seqText}</div>
+
+  <div class="dc">
+    <div class="dt">${tp.pdf.timelineView}</div>
+    <div style="margin:10px 0;">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="font-family:var(--sans);font-size:10px;color:var(--t3);width:85px;text-align:right;">${tp.pdf.box3Lbl}</span>
+        <div style="flex:1;height:22px;background:#1e293b;border-radius:4px;overflow:hidden;"><div style="width:${Math.min(100, Math.round(bridgeYrs * 30))}%;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--em-dk),var(--em));display:flex;align-items:center;justify-content:center;font-family:var(--sans);font-size:8px;font-weight:700;color:white;">${tp.pdf.yrsPrefix} 1–${Math.min(Math.round(bridgeYrs * 0.4), Math.round(bridgeYrs))}</div></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="font-family:var(--sans);font-size:10px;color:var(--t3);width:85px;text-align:right;">${tp.pdf.lijfrenteLbl}</span>
+        <div style="flex:1;height:22px;background:#1e293b;border-radius:4px;overflow:hidden;"><div style="width:${Math.min(100, Math.round(bridgeYrs * 25))}%;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--bl),var(--bl-lt));display:flex;align-items:center;justify-content:center;font-family:var(--sans);font-size:8px;font-weight:700;color:white;">${tp.pdf.taxDraw}</div></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:6px;">
+        <span style="font-family:var(--sans);font-size:10px;color:var(--t3);width:85px;text-align:right;">${tp.pdf.pillar2Lbl}</span>
+        <div style="flex:1;height:22px;background:#1e293b;border-radius:4px;overflow:hidden;"><div style="width:${Math.min(100, Math.round(bridgeYrs * 20))}%;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--pu),#a78bfa);display:flex;align-items:center;justify-content:center;font-family:var(--sans);font-size:8px;font-weight:700;color:white;">${tp.pdf.employerLbl}</div></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px;">
+        <span style="font-family:var(--sans);font-size:10px;color:var(--t3);width:85px;text-align:right;">${tp.pdf.aow67Lbl}</span>
+        <div style="flex:1;height:22px;background:#1e293b;border-radius:4px;overflow:hidden;"><div style="width:100%;height:100%;border-radius:4px;background:linear-gradient(90deg,var(--or),var(--or-lt));display:flex;align-items:center;justify-content:center;font-family:var(--sans);font-size:8px;font-weight:700;color:white;">${tp.pdf.lifetimeFloor}</div></div>
       </div>
     </div>
   </div>
 </div>
 
-<!-- ============ REAL ESTATE & FAMILY ============ -->
-<div class="container" style="padding-top: 16px;">
-  <div class="section-divider"></div>
-  <h2>Real Estate &amp; Family Wealth: The Structural Shelter</h2>
-
-  ${formData.propertyValue > 0 ? '<div class="data-card"><div class="data-card-title">Bigger House Strategy</div><div class="comparison-row"><div class="comparison-box before"><div class="cb-label">Current Setup</div><div class="cb-value">&euro;' + fictitiousTax.toLocaleString() + '/yr</div><div class="cb-desc">Box 3 tax on excess assets</div></div><div class="comparison-box after"><div class="cb-label">After Upgrade</div><div class="cb-value">Reduced</div><div class="cb-desc">Mortgage shifts wealth to Box 1 (exempt)</div></div></div><p style="font-size: 12px; color: #64748b;">HRA deduction: <strong>37.56%</strong> in 2026. Eigenwoningforfait: <strong>&euro;' + Math.round(formData.propertyValue * 0.0035).toLocaleString() + '/yr</strong> (0.35% of WOZ).</p></div>' : ''}
-
-  ${formData.hasChildren ? '<div class="data-card"><div class="data-card-title">Family Wealth Flow — Gifting Strategy</div><p style="font-size: 12px; color: #cbd5e1;">Tax-free gifting 2026: <strong>&euro;6,908/child/year</strong> (&euro;13,816 from partners).<br>One-time enlarged: <strong>&euro;33,129</strong> per child (age 18–40).<br>"Schenken op papier": Keep capital, owe child 6% interest — deductible as Box 3 debt.</p><div class="badge-row"><span class="badge green">Annual shift: &euro;' + (formData.childrenCount * 6908).toLocaleString() + '</span><span class="badge blue">' + formData.childrenCount + ' child' + (formData.childrenCount > 1 ? 'ren' : '') + '</span></div></div>' : ''}
-</div>
-
-<!-- ============ GEO-ARBITRAGE ============ -->
+<!-- ======== PAGE 7 : AI ANALYSIS ======== -->
 <div class="page-break"></div>
-<div class="container" style="padding-top: 48px;">
-  <h2>Global Retirement: The Geo-Arbitrage Catalog</h2>
-  <p>Countries with the most favourable tax treaties for Dutch residents retiring abroad.</p>
-
-  <div class="country-grid">
-    ${countries.map(c => '<div class="country-card"><div class="cc-name">' + c.flag + ' ' + c.name + '</div><div class="cc-tax">' + c.tax + '</div><div class="cc-benefit">' + c.benefit + '</div></div>').join('')}
-  </div>
-</div>
-
-<!-- ============ BRIDGE PHASE ============ -->
-<div class="container" style="padding-top: 16px;">
-  <div class="section-divider"></div>
-  <h2>Bridge Phase Strategy: Age ${formData.targetRetirementAge} → 67</h2>
-  <p>${Math.round(bridgeYrs)} years of self-funded retirement before full AOW kicks in. Total cost: <strong>&euro;${bridgeCost.toLocaleString()}</strong>.</p>
-
-  <div class="data-card">
-    <div class="data-card-title">Bridge Phase Funding Timeline</div>
-    <div class="gantt-bar-container">
-      <div class="gantt-row">
-        <span class="gantt-label">Box 3 Savings</span>
-        <div class="gantt-track"><div class="gantt-fill savings" style="width: ${Math.min(100, Math.round(bridgeYrs * 30))}%">Years 1–${Math.min(Math.round(bridgeYrs * 0.4), Math.round(bridgeYrs))}</div></div>
-      </div>
-      <div class="gantt-row">
-        <span class="gantt-label">Lijfrente (P3)</span>
-        <div class="gantt-track"><div class="gantt-fill lijfrente" style="width: ${Math.min(100, Math.round(bridgeYrs * 25))}%">Tax-efficient draw</div></div>
-      </div>
-      <div class="gantt-row">
-        <span class="gantt-label">Pillar 2</span>
-        <div class="gantt-track"><div class="gantt-fill p2" style="width: ${Math.min(100, Math.round(bridgeYrs * 20))}%">Workplace pension</div></div>
-      </div>
-      <div class="gantt-row">
-        <span class="gantt-label">AOW (67+)</span>
-        <div class="gantt-track"><div class="gantt-fill aow" style="width: 100%">Full state pension from age 67</div></div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ============ AI ANALYSIS (all 8 sections) ============ -->
-<div class="page-break"></div>
-<div class="container" style="padding-top: 48px;">
-  <h2>Detailed Wealth Architect Analysis</h2>
-  <p style="color: #64748b; font-style: italic; margin-bottom: 24px;">The following is your personalized, AI-powered analysis covering all pillars of Dutch wealth strategy.</p>
+<div class="c" style="padding-top:48px;">
+  <h2>${tp.pdf.aiTitle}</h2>
+  <p style="color:var(--t4);font-style:italic;margin-bottom:24px;">${tp.pdf.aiDesc}</p>
   ${contentHtml}
 </div>
 
-<!-- ============ DISCLAIMER & FOOTER ============ -->
-<div class="container" style="padding-bottom: 60px;">
-  <div class="disclaimer">
-    <strong>Disclaimer:</strong> This report is generated by AI based on the information you provided and current Dutch tax law as of 2026.
-    It does not constitute personal financial or tax advice. Always consult a qualified Dutch tax advisor (belastingadviseur)
-    or financial planner (financieel planner) before making financial decisions. Tax laws, rates, and thresholds may change.
-    ProsperPath is not liable for any actions taken based on this report.
+<!-- ======== PAGE 8 : TRIAGE CHECKLIST + PRICE OF INACTION ======== -->
+<div class="page-break"></div>
+<div class="c" style="padding-top:48px;">
+  <h2>${tp.pdf.triageTitle}</h2>
+  <p>${tp.pdf.triageDesc}</p>
+
+  <div class="tr-board">
+    <div class="tr-item critical">
+      <div class="tr-num">01</div>
+      <div class="tr-body">
+        <div class="tr-tag now">${tp.pdf.immediate}</div>
+        <div class="tr-title">${tp.pdf.act1Title}</div>
+        <div class="tr-desc">${tp.pdf.act1a} &euro;${p3Room.toLocaleString()} ${tp.pdf.act1b} &euro;${p3RefundLow.toLocaleString()}–&euro;${p3RefundHigh.toLocaleString()} ${tp.pdf.act1c}</div>
+      </div>
+    </div>
+
+    ${formData.hasChildren ? '<div class="tr-item urgent"><div class="tr-num">02</div><div class="tr-body"><div class="tr-tag legal">' + tp.pdf.legal + '</div><div class="tr-title">' + tp.pdf.act2Title + '</div><div class="tr-desc">' + tp.pdf.act2a + ' &euro;' + (formData.childrenCount * 6908).toLocaleString() + ' ' + tp.pdf.act2b + ' ' + formData.childrenCount + ' ' + (formData.childrenCount > 1 ? tp.pdf.childPl : tp.pdf.childSg) + '' + tp.pdf.act2c + '</div></div></div>' : ''}
+
+    <div class="tr-item urgent">
+      <div class="tr-num">${formData.hasChildren ? '03' : '02'}</div>
+      <div class="tr-body">
+        <div class="tr-tag soon">${tp.pdf.thisQuarter}</div>
+        <div class="tr-title">${tp.pdf.act3Title}</div>
+        <div class="tr-desc">${tp.pdf.act3a} &euro;${formData.hasSpouse ? '114,000' : '57,000'} ${tp.pdf.act3b} &euro;${fictitiousTax.toLocaleString()}${tp.pdf.act3c}</div>
+      </div>
+    </div>
+
+    <div class="tr-item">
+      <div class="tr-num">${formData.hasChildren ? '04' : '03'}</div>
+      <div class="tr-body">
+        <div class="tr-tag plan">${tp.pdf.planning}</div>
+        <div class="tr-title">${tp.pdf.act4Title}</div>
+        <div class="tr-desc">${tp.pdf.act4a} &euro;${estimated2028Tax.toLocaleString()}${tp.pdf.act4b}</div>
+      </div>
+    </div>
+
+    <div class="tr-item">
+      <div class="tr-num">${formData.hasChildren ? '05' : '04'}</div>
+      <div class="tr-body">
+        <div class="tr-tag plan">${tp.pdf.planning}</div>
+        <div class="tr-title">${tp.pdf.act5Title}</div>
+        <div class="tr-desc">${tp.pdf.act5a} &euro;${bridgeCost.toLocaleString()} ${tp.pdf.act5b} ${Math.round(bridgeYrs)} ${tp.pdf.act5c} ${formData.targetRetirementAge}${tp.pdf.act5d}</div>
+      </div>
+    </div>
+
+    ${formData.propertyValue > 0 ? '<div class="tr-item"><div class="tr-num">' + (formData.hasChildren ? '06' : '05') + '</div><div class="tr-body"><div class="tr-tag plan">' + tp.pdf.planning + '</div><div class="tr-title">' + tp.pdf.act6Title + '</div><div class="tr-desc">' + tp.pdf.act6a + ' &euro;' + Math.round(formData.propertyValue * 0.0035).toLocaleString() + '' + tp.pdf.act6b + '</div></div></div>' : ''}
   </div>
 
-  <div class="report-footer">
-    <span class="brand">ProsperPath</span> &bull; AI-Powered Dutch Wealth Strategy &bull; ${dateStr}<br>
-    This is a personalized report. Do not share publicly.
+  <!-- Price of Inaction Footer -->
+  <div class="inaction">
+    <div class="ia-title">${tp.pdf.inactionTitle}</div>
+    <div class="ia-big">&euro;${monthlyLeakCost.toLocaleString()} ${tp.pdf.perMonth}</div>
+    <div class="ia-sub">${tp.pdf.inactionEvery} &euro;${monthlyLeakCost.toLocaleString()} ${tp.pdf.inactionIn} &euro;${taxLeakAnnual.toLocaleString()} ${tp.pdf.inactionPer}</div>
+  </div>
+</div>
+
+<!-- ======== DISCLAIMER & FOOTER ======== -->
+<div class="c" style="padding-bottom:60px;">
+  <div class="disc">
+    <strong>${tp.pdf.disclaimerLabel}</strong> ${tp.pdf.disclaimerText}
+  </div>
+  <div class="ft">
+    <span class="b">VRIJWEALTH</span> &bull; ${tp.pdf.footerBrand} &bull; ${dateStr}<br>
+    ${tp.pdf.footerPersonal}
   </div>
 </div>
 
@@ -773,18 +1156,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph about y
   };
 
   // Loading messages to keep users engaged
-  const loadingMessages = [
-    "Scanning 2026 Dutch Tax Law... Every day you wait is a day of missed compounding.",
-    "Checking for 'wealth leaks'... You might be losing up to 2% of your net worth to inflation right now.",
-    "Calculating your 'Tax Drag'... Don't let Box 3 eat your retirement before it even starts.",
-    "Analyzing your mortgage... Is your bank getting richer while your freedom date stays the same?",
-    "Finding the money you're leaving on the table...",
-    "Reviewing your Box 3 assets for optimization opportunities...",
-    "Comparing 2026 vs 2028 tax scenarios... The new rules change everything.",
-    "Building your personalized wealth exit strategy...",
-    "Calculating compound interest on your discovered savings...",
-    "Your financial freedom date is about to be revealed..."
-  ];
+  const loadingMessages = translations[language].loading.messages;
 
   // Cycle through loading messages every 4 seconds
   useEffect(() => {
@@ -1031,23 +1403,23 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph about y
     
     if (step === 'household') {
       if (!formData.fullName.trim()) {
-        errors.fullName = 'Full name is required';
+        errors.fullName = t.validation.fullNameRequired;
       }
       if (!formData.age || formData.age < 18 || formData.age > 100) {
-        errors.age = 'Please enter a valid age (18-100)';
+        errors.age = t.validation.validAge;
       }
       if (!formData.retirementAge || formData.retirementAge < formData.age || formData.retirementAge > 100) {
-        errors.retirementAge = 'Retirement age must be greater than current age';
+        errors.retirementAge = t.validation.retirementAgeGreater;
       }
       if (!formData.country.trim()) {
-        errors.country = 'Country is required';
+        errors.country = t.validation.countryRequired;
       }
       if (formData.hasChildren && (!formData.childrenCount || formData.childrenCount < 1)) {
-        errors.childrenCount = 'Please enter number of children';
+        errors.childrenCount = t.validation.childrenCount;
       }
     } else if (step === 'financials') {
       if (formData.grossSalary === '' || formData.grossSalary === null || formData.grossSalary === undefined) {
-        errors.grossSalary = 'Gross salary is required (can be 0)';
+        errors.grossSalary = t.validation.grossSalary;
       }
       // New detailed fields are optional, just ensure types are correct
       if (formData.savingsBalance === null || formData.savingsBalance === undefined) {
@@ -1070,20 +1442,20 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph about y
       }
     } else if (step === 'pension') {
       if (formData.jaarruimte === '' || formData.jaarruimte === null || formData.jaarruimte === undefined) {
-        errors.jaarruimte = 'Jaarruimte is required (can be 0)';
+        errors.jaarruimte = t.validation.jaarruimte;
       }
       if (formData.factorA === '' || formData.factorA === null || formData.factorA === undefined) {
-        errors.factorA = 'Factor A is required (can be 0)';
+        errors.factorA = t.validation.factorA;
       }
     } else if (step === 'realEstate') {
       if (formData.mortgageBalance === '' || formData.mortgageBalance === null || formData.mortgageBalance === undefined) {
-        errors.mortgageBalance = 'Mortgage balance is required (can be 0)';
+        errors.mortgageBalance = t.validation.mortgageBalance;
       }
       if (formData.mortgageInterestRate === '' || formData.mortgageInterestRate === null || formData.mortgageInterestRate === undefined) {
-        errors.mortgageInterestRate = 'Interest rate is required (can be 0)';
+        errors.mortgageInterestRate = t.validation.interestRate;
       }
       if (formData.mortgageYearsLeft === '' || formData.mortgageYearsLeft === null || formData.mortgageYearsLeft === undefined) {
-        errors.mortgageYearsLeft = 'Years left is required (can be 0)';
+        errors.mortgageYearsLeft = t.validation.yearsLeft;
       }
       // New detailed fields are optional
       if (formData.propertyValue === null || formData.propertyValue === undefined) {
@@ -1103,10 +1475,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph about y
       }
     } else if (step === 'retirement') {
       if (!formData.targetRetirementAge || formData.targetRetirementAge < 30 || formData.targetRetirementAge > 80) {
-        errors.targetRetirementAge = 'Please enter a valid retirement age (30-80)';
+        errors.targetRetirementAge = t.validation.retirementAge;
       }
       if (!formData.desiredMonthlyIncome || formData.desiredMonthlyIncome < 0) {
-        errors.desiredMonthlyIncome = 'Please enter your desired monthly income';
+        errors.desiredMonthlyIncome = t.validation.monthlyIncome;
       }
     }
     
@@ -1162,23 +1534,11 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph about y
     // Sync detailed financial data from form to state variables
     syncDetailedFinancials();
 
-    // Calculate total Box 3 assets
-    const totalBox3Assets = formData.savingsAmount + formData.investmentAmount - formData.debtAmount;
-    const taxFreeAllowance = formData.hasSpouse ? 114000 : 57000; // 2026 allowance
-    const taxableBase = Math.max(0, totalBox3Assets - taxFreeAllowance);
-
-    const aowPct = Math.max(0, Math.min(100, (50 - formData.yearsAbroad) * 2));
-    const bridgeYrs = Math.max(0, Math.round((67.25 - formData.targetRetirementAge) * 10) / 10);
-    const bridgeCost = Math.round(bridgeYrs * 12 * formData.desiredMonthlyIncome);
-    const netWealth = formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue - formData.mortgageBalance;
-    const p3Room = formData.jaarruimte + formData.reserveringsruimte;
-    const equity = formData.propertyValue - formData.mortgageBalance;
-    const aowShortfall = Math.round((1 - aowPct / 100) * 1637);
-    const basicAge = parseInt(formData.age) || 30;
-    const basicYearsToFire = Math.max(0, formData.targetRetirementAge - basicAge);
-    const basicInflationMultiplier = Math.pow(1.022, basicYearsToFire);
-    const basicFutureMonthlyNeed = Math.round(formData.desiredMonthlyIncome * basicInflationMultiplier);
-    const futureBridgeCostBasic = Math.round(bridgeYrs * 12 * basicFutureMonthlyNeed);
+    // Use shared financial calculations
+    const basicDerived = computeDerivedValues(formData);
+    const { aowPct, bridgeYrs, netWealth, p3Room, equity, aowShortfall, age: basicAge,
+            yearsToFire: basicYearsToFire, futureMonthlyNeed: basicFutureMonthlyNeed,
+            futureBridgeCost: futureBridgeCostBasic } = basicDerived;
 
     const prompt = `Dutch FIRE & Tax Architect. Analyze profile, find Wealth Leakage, provide 2026-optimized early retirement roadmap.
 
@@ -1250,13 +1610,24 @@ PRODUCT_2_TYPE: Fund
 PRODUCT_2_DESC: Box 3 friendly via fiscal transparency.
 ---
 
-STRATEGIC SUMMARY (Max 150 words): Bridge funding age ${formData.targetRetirementAge}→AOW (€${futureBridgeCostBasic.toLocaleString()} inflation-adjusted), Box 3 optimization pre-2028, Pillar 3 maximization, AOW gap, SWR sustainability using real returns (nominal − 2.2%). Actionable € amounts in today's euros.
+STRATEGIC SUMMARY: Bridge funding age ${formData.targetRetirementAge}→AOW (€${futureBridgeCostBasic.toLocaleString()} inflation-adjusted), Box 3 optimization pre-2028, Pillar 3 maximization, AOW gap, SWR sustainability using real returns (nominal − 2.2%). Actionable € amounts in today's euros.
 
-IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start directly with the structured output (MONTHLY_NEED, TARGET_NEST_EGG, etc.) followed by the action steps and strategy sections. Do not introduce yourself or explain what you are doing.`;
+IMPORTANT: Keep the STRATEGIC SUMMARY section to a maximum of 150 words. Do NOT write any introduction, preamble, or opening paragraph. Start directly with the structured output (MONTHLY_NEED, TARGET_NEST_EGG, etc.) followed by the action steps and strategy sections. Do not introduce yourself or explain what you are doing.`;
 
     setIsSubmitting(true);
     setLoadingMessageIndex(0);
-    
+    setBasicRetryCount(0);
+
+    const MAX_CLIENT_RETRIES = 3;
+    let lastError = null;
+
+    for (let clientRetry = 0; clientRetry < MAX_CLIENT_RETRIES; clientRetry++) {
+      if (clientRetry > 0) {
+        console.log(`Basic analysis client retry ${clientRetry + 1}/${MAX_CLIENT_RETRIES}...`);
+        setBasicRetryCount(clientRetry);
+        await new Promise(r => setTimeout(r, 2000)); // brief delay between retries
+      }
+
     try {
       // Create abort controller for client-side timeout
       const abortController = new AbortController();
@@ -1295,280 +1666,25 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
         responseText = JSON.stringify(result, null, 2);
       }
       
-      console.log('=== RAW AI RESPONSE (first 2000 chars) ===');
-      console.log(responseText.substring(0, 2000));
-      console.log('=== END RAW RESPONSE ===');
-      
-      // Parse metrics from response
-      const metricsParsed = {
-        monthlyNeed: 0,
-        targetNestEgg: 0,
-        gapToFill: 0,
-        monthlySavingsTarget: 0
-      };
-      
-      const allocationParsed = {
-        stocks: 0,
-        bonds: 0,
-        realEstate: 0,
-        cash: 0
-      };
-      
-      const projectionParsed = {
-        currentWealth: 0,
-        projectedAtRetirement: 0,
-        targetNestEgg: 0
-      };
-      
-      const actionStepsParsed = [];
-      const dutchTaxParsed = {
-        box3Strategy: '',
-        pensionRecommendations: '',
-        estimatedAnnualTax: 0
-      };
-      const productsParsed = [];
-      
-      // Split response into lines for parsing
-      const lines = responseText.split('\n');
-      let strategyLines = [];
-      let foundMetrics = false;
-      
-      // Parse each line
-      let currentSection = 'metrics'; // Track which section we're in
-      let currentMultiLineField = null; // Track if we're collecting multi-line values
-      let currentMultiLineValue = '';
-      
-      for (let line of lines) {
-        const trimmedLine = line.trim();
-        
-        // Check for section separators (both -- and --- format)
-        if (trimmedLine.match(/^-{2,}(ACTIONS|DUTCH_TAX|PRODUCTS)?-{0,}$/)) {
-          // Save any pending multi-line field
-          if (currentMultiLineField) {
-            if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
-            else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
-            currentMultiLineField = null;
-            currentMultiLineValue = '';
-          }
-          
-          if (trimmedLine.includes('ACTIONS')) currentSection = 'actions';
-          else if (trimmedLine.includes('DUTCH_TAX')) currentSection = 'dutch_tax';
-          else if (trimmedLine.includes('PRODUCTS')) currentSection = 'products';
-          else currentSection = 'strategy';
-          continue; // Skip separator lines
-        }
-        
-        // Parse structured data lines — always check regardless of current section
-        // This handles AI responses that mix prose with structured output
-        // Strip markdown bold markers and leading bullet markers for parsing
-        const cleanLine = trimmedLine.replace(/\*\*/g, '').replace(/^[-•*]\s*/, '').trim();
-        
-        // Debug: log lines that look like they contain metric keys
-        if (/MONTHLY_NEED|TARGET_NEST|GAP_TO|MONTHLY_SAVINGS/i.test(cleanLine)) {
-          console.log('METRIC LINE FOUND:', JSON.stringify(cleanLine));
-        }
-        
-        if (cleanLine.match(/^MONTHLY_NEED[:\s]/i)) {
-          const match = cleanLine.match(/MONTHLY_NEED:?\s*[€$]?([\d,\.]+)/i);
-          if (match) metricsParsed.monthlyNeed = parseInt(match[1].replace(/[,\.]/g, ''));
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^TARGET_NEST_EGG[:\s]/i)) {
-          const match = cleanLine.match(/TARGET_NEST_EGG:?\s*[€$]?([\d,\.]+)/i);
-          if (match) metricsParsed.targetNestEgg = parseInt(match[1].replace(/[,\.]/g, ''));
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^GAP_TO_FILL[:\s]/i)) {
-          const match = cleanLine.match(/GAP_TO_FILL:?\s*[€$]?([\d,\.]+)/i);
-          if (match) metricsParsed.gapToFill = parseInt(match[1].replace(/[,\.]/g, ''));
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^MONTHLY_SAVINGS_TARGET[:\s]/i)) {
-          const match = cleanLine.match(/MONTHLY_SAVINGS_TARGET:?\s*[€$]?([\d,\.]+)/i);
-          if (match) metricsParsed.monthlySavingsTarget = parseInt(match[1].replace(/[,\.]/g, ''));
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^ALLOCATION_STOCKS[:\s]/i)) {
-          const match = cleanLine.match(/ALLOCATION_STOCKS:?\s*(\d+)%?/i);
-          if (match) allocationParsed.stocks = parseInt(match[1]);
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^ALLOCATION_BONDS[:\s]/i)) {
-          const match = cleanLine.match(/ALLOCATION_BONDS:?\s*(\d+)%?/i);
-          if (match) allocationParsed.bonds = parseInt(match[1]);
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^ALLOCATION_REAL_ESTATE[:\s]/i)) {
-          const match = cleanLine.match(/ALLOCATION_REAL_ESTATE:?\s*(\d+)%?/i);
-          if (match) allocationParsed.realEstate = parseInt(match[1]);
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^ALLOCATION_CASH[:\s]/i)) {
-          const match = cleanLine.match(/ALLOCATION_CASH:?\s*(\d+)%?/i);
-          if (match) allocationParsed.cash = parseInt(match[1]);
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^CURRENT_WEALTH[:\s]/i)) {
-          const match = cleanLine.match(/CURRENT_WEALTH:?\s*[€$]?([\d,\.]+)/i);
-          if (match) projectionParsed.currentWealth = parseInt(match[1].replace(/[,\.]/g, ''));
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^PROJECTED_AT_RETIREMENT[:\s]/i)) {
-          const match = cleanLine.match(/PROJECTED_AT_RETIREMENT:?\s*[€$]?([\d,\.]+)/i);
-          if (match) projectionParsed.projectedAtRetirement = parseInt(match[1].replace(/[,\.]/g, ''));
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^ACTION_STEP_/i)) {
-          const stepMatch = cleanLine.match(/ACTION_STEP_(\d+)_(TITLE|PRIORITY|TAG|DESC):?\s*(.+)/i);
-          if (stepMatch) {
-            const stepNum = parseInt(stepMatch[1]) - 1;
-            const field = stepMatch[2].toLowerCase();
-            const value = stepMatch[3].trim();
-            
-            if (!actionStepsParsed[stepNum]) {
-              actionStepsParsed[stepNum] = { title: '', priority: '', tag: '', description: '' };
-            }
-            
-            if (field === 'title') actionStepsParsed[stepNum].title = value;
-            else if (field === 'priority') actionStepsParsed[stepNum].priority = value;
-            else if (field === 'tag') actionStepsParsed[stepNum].tag = value;
-            else if (field === 'desc') actionStepsParsed[stepNum].description = value;
-          }
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^BOX3_STRATEGY[:\s]/i)) {
-          // Save any pending multi-line field
-          if (currentMultiLineField) {
-            if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
-            else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
-          }
-          
-          const match = cleanLine.match(/BOX3_STRATEGY:?\s*(.+)/i);
-          currentMultiLineField = 'box3Strategy';
-          currentMultiLineValue = match && match[1] ? match[1].trim() : '';
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^PENSION_RECOMMENDATIONS[:\s]/i)) {
-          // Save any pending multi-line field
-          if (currentMultiLineField) {
-            if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
-            else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
-          }
-          
-          const match = cleanLine.match(/PENSION_RECOMMENDATIONS:?\s*(.+)/i);
-          currentMultiLineField = 'pensionRecommendations';
-          currentMultiLineValue = match && match[1] ? match[1].trim() : '';
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^ESTIMATED_ANNUAL_BOX3_TAX[:\s]/i)) {
-          // Save any pending multi-line field
-          if (currentMultiLineField) {
-            if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
-            else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
-            currentMultiLineField = null;
-            currentMultiLineValue = '';
-          }
-          
-          const match = cleanLine.match(/ESTIMATED_ANNUAL_BOX3_TAX:?\s*[€$]?([\d,\.]+)/i);
-          if (match) dutchTaxParsed.estimatedAnnualTax = parseInt(match[1].replace(/,/g, ''));
-          foundMetrics = true;
-          continue;
-        } else if (cleanLine.match(/^PRODUCT_/i)) {
-          // Save any pending multi-line field
-          if (currentMultiLineField) {
-            if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
-            else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
-            currentMultiLineField = null;
-            currentMultiLineValue = '';
-          }
-          
-          const prodMatch = cleanLine.match(/PRODUCT_(\d+)_(NAME|TYPE|DESC):?\s*(.+)/i);
-          if (prodMatch) {
-            const prodNum = parseInt(prodMatch[1]) - 1;
-            const field = prodMatch[2].toLowerCase();
-            const value = prodMatch[3].trim();
-            
-            if (!productsParsed[prodNum]) {
-              productsParsed[prodNum] = { name: '', type: '', description: '' };
-            }
-            
-            if (field === 'name') productsParsed[prodNum].name = value;
-            else if (field === 'type') productsParsed[prodNum].type = value;
-            else if (field === 'desc') productsParsed[prodNum].description = value;
-          }
-          foundMetrics = true;
-          continue;
-        }
-        
-        // Collect multi-line Dutch Tax field values
-        if (currentMultiLineField && trimmedLine) {
-          currentMultiLineValue += ' ' + trimmedLine;
-          continue;
-        }
-        
-        // Everything else goes to strategy text (skip empty lines and section separators)
-        if (trimmedLine) {
-          strategyLines.push(line);
-        }
+      if (!responseText || responseText.trim().length === 0) {
+        throw new Error('Empty response from AI service');
       }
-      
-      // Save any pending multi-line field at the end
-      if (currentMultiLineField) {
-        if (currentMultiLineField === 'box3Strategy') dutchTaxParsed.box3Strategy = currentMultiLineValue.trim();
-        else if (currentMultiLineField === 'pensionRecommendations') dutchTaxParsed.pensionRecommendations = currentMultiLineValue.trim();
-      }
-      
-      // Join strategy lines and clean up
-      let strategyText = strategyLines.join('\n').trim();
 
-      console.log('PARSED METRICS:', JSON.stringify(metricsParsed));
-      console.log('PARSED ALLOCATION:', JSON.stringify(allocationParsed));
-      console.log('PARSED PROJECTION:', JSON.stringify(projectionParsed));
-      console.log('FOUND METRICS:', foundMetrics);
-      
-      // Set target nest egg in projection
-      projectionParsed.targetNestEgg = metricsParsed.targetNestEgg;
-      
-      // Calculate current wealth from form data if not provided by AI
-      if (projectionParsed.currentWealth === 0) {
-        projectionParsed.currentWealth = formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue - formData.mortgageBalance;
-      }
-      
-      // If no metrics were found, use form data for current wealth as fallback
-      if (!foundMetrics) {
-        projectionParsed.currentWealth = formData.savingsBalance + formData.cryptoValueDec31 + formData.propertyValue - formData.mortgageBalance;
-      }
-      
+      // Parse structured AI response using extracted helper
+      const parsed = parseAiResponse(responseText);
+      let { metrics: metricsParsed, allocation: allocationParsed, projection: projectionParsed } = parsed;
+      const { actionSteps: actionStepsParsed, dutchTax: dutchTaxParsed, products: productsParsed, strategyText, foundMetrics } = parsed;
+
       // Fallback allocation based on age if AI didn't provide one
       if (allocationParsed.stocks === 0 && allocationParsed.bonds === 0 && allocationParsed.realEstate === 0 && allocationParsed.cash === 0) {
-        const age = parseInt(formData.age) || 30;
-        const stockPct = Math.max(20, Math.min(80, 110 - age));
-        const bondPct = Math.round((100 - stockPct) * 0.5);
-        const rePct = Math.round((100 - stockPct) * 0.3);
-        const cashPct = 100 - stockPct - bondPct - rePct;
-        allocationParsed.stocks = stockPct;
-        allocationParsed.bonds = bondPct;
-        allocationParsed.realEstate = rePct;
-        allocationParsed.cash = cashPct;
-        console.log('USING FALLBACK ALLOCATION (age-based):', JSON.stringify(allocationParsed));
+        allocationParsed = fallbackAllocation(parseInt(formData.age) || 30);
       }
-      
-      // Fallback metrics from form data if AI didn't parse them
-      if (metricsParsed.monthlyNeed === 0 && formData.desiredMonthlyIncome > 0) {
-        metricsParsed.monthlyNeed = parseInt(formData.desiredMonthlyIncome);
-      }
-      if (metricsParsed.targetNestEgg === 0 && formData.desiredMonthlyIncome > 0) {
-        metricsParsed.targetNestEgg = Math.round(formData.desiredMonthlyIncome * 12 / 0.04);
-        projectionParsed.targetNestEgg = metricsParsed.targetNestEgg;
-      }
-      if (metricsParsed.gapToFill === 0 && metricsParsed.targetNestEgg > 0) {
-        metricsParsed.gapToFill = Math.max(0, metricsParsed.targetNestEgg - projectionParsed.currentWealth);
-      }
-      if (metricsParsed.monthlySavingsTarget === 0 && metricsParsed.gapToFill > 0) {
-        const yrsLeft = Math.max(1, (formData.targetRetirementAge || 65) - (parseInt(formData.age) || 30));
-        metricsParsed.monthlySavingsTarget = Math.round(metricsParsed.gapToFill / (yrsLeft * 12));
-      }
-      
+
+      // Fill in missing metrics from form data
+      const fallbacks = applyMetricFallbacks(metricsParsed, projectionParsed, formData);
+      metricsParsed = fallbacks.metrics;
+      projectionParsed = fallbacks.projection;
+
       // Store AI response and show results page
       setMetrics(metricsParsed);
       setAllocation(allocationParsed);
@@ -1577,25 +1693,56 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
       setDutchTaxOptimization(dutchTaxParsed);
       setRecommendedProducts(productsParsed.filter(product => product.name)); // Filter out empty products
       setAiResponse(strategyText);
+
+      // Check completeness: did we get metrics + at least 3 action steps?
+      const serverMeta = result._meta || {};
+      const hasMetrics = metricsParsed.monthlyNeed > 0 || metricsParsed.targetNestEgg > 0;
+      const hasEnoughActions = actionStepsParsed.filter(s => s.title).length >= 3;
+      const isBasicComplete = serverMeta.complete !== undefined ? serverMeta.complete : (hasMetrics && hasEnoughActions);
+      
+      console.log(`Basic analysis completeness: hasMetrics=${hasMetrics}, actions=${actionStepsParsed.filter(s => s.title).length}, serverComplete=${serverMeta.complete}, isComplete=${isBasicComplete}`);
+
+      if (!isBasicComplete && clientRetry < MAX_CLIENT_RETRIES - 1) {
+        console.warn(`Basic analysis incomplete (retry ${clientRetry + 1}/${MAX_CLIENT_RETRIES}), retrying...`);
+        continue; // retry the for loop
+      }
+
+      // Accept the response (complete or best effort after all retries)
       setShowQuestionnaire(false);
       setShowResults(true);
       setIsSubmitting(false);
+      setBasicRetryCount(0);
+      return; // success — exit the function
     } catch (error) {
-      setIsSubmitting(false);
-      
-      // Better error messages based on error type
-      let errorMessage = 'Error processing your request.\n\n';
-      
-      if (error.name === 'AbortError') {
-        errorMessage += 'Request timed out after 6 minutes. The AI service may be overloaded.\n\nPlease try again in a few moments.';
-      } else if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
-        errorMessage += 'Network connection error. Please check your internet connection and try again.';
-      } else {
-        errorMessage += `${error.message}\n\nIf this persists, the AI service may be experiencing high demand.`;
+      lastError = error;
+      console.error(`Basic analysis error (attempt ${clientRetry + 1}/${MAX_CLIENT_RETRIES}):`, error.message);
+
+      if (clientRetry < MAX_CLIENT_RETRIES - 1) {
+        console.log('Will retry after delay...');
+        continue; // retry the for loop
       }
-      
-      alert(errorMessage);
     }
+    } // end retry for loop
+
+    // All retries exhausted — show error
+    setIsSubmitting(false);
+    setBasicRetryCount(0);
+
+    let errorMessage = t.errors.processingError + '\n\n';
+    
+    if (lastError) {
+      if (lastError.name === 'AbortError') {
+        errorMessage += t.errors.timeout;
+      } else if (lastError.message.includes('Failed to fetch') || lastError.message.includes('NetworkError')) {
+        errorMessage += t.errors.networkError;
+      } else {
+        errorMessage += `${lastError.message}`;
+      }
+    } else {
+      errorMessage += t.errors.incompleteAnalysis;
+    }
+    
+    alert(errorMessage);
   };
 
   const handleAdjustParameters = () => {
@@ -1604,17 +1751,27 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
     setCurrentStep('household');
   };
 
+  // Theme-aware page background class
+  const pageBg = darkMode
+    ? 'min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950'
+    : 'min-h-screen bg-slate-50';
+
+  // Theme-aware card class
+  const cardClass = darkMode
+    ? 'bg-slate-800/40 backdrop-blur-sm border border-slate-700'
+    : 'bg-white border border-slate-200 shadow-sm';
+
   // Payment Modal (rendered across all pages)
   const paymentModal = showPaymentModal ? (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-50 flex items-start sm:items-center justify-center overflow-y-auto p-4 pt-8 sm:pt-4">
       {/* Backdrop */}
       <div 
-        className="absolute inset-0 bg-black/60 backdrop-blur-sm"
+        className="fixed inset-0 bg-black/60 backdrop-blur-sm"
         onClick={() => !paymentProcessing && setShowPaymentModal(false)}
       ></div>
       
       {/* Modal */}
-      <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden">
+      <div className="relative bg-white rounded-2xl shadow-2xl max-w-md w-full overflow-hidden my-auto">
         {/* Header */}
         <div className="bg-gradient-to-r from-slate-900 to-slate-800 px-6 py-5">
           <div className="flex items-center justify-between">
@@ -1626,7 +1783,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               </div>
               <div>
                 <h3 className="text-white font-bold text-lg">VrijWealth</h3>
-                <p className="text-slate-400 text-xs">Secure checkout</p>
+                <p className="text-slate-400 text-xs">{t.payment.secureCheckout}</p>
               </div>
             </div>
             {!paymentProcessing && (
@@ -1645,7 +1802,111 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
         {paymentSuccess ? (
           /* Success State */
           <div className="px-6 py-8 text-center">
-            {pdfGenerating ? (
+            {pdfRetriesExhausted && !pdfReady ? (
+              /* All retries exhausted — Email Fallback */
+              <>
+                {emailSubmitted ? (
+                  /* Email submitted successfully */
+                  <>
+                    <div className="w-16 h-16 bg-emerald-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <svg className="w-8 h-8 text-emerald-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                      </svg>
+                    </div>
+                    <h3 className="text-slate-900 text-xl font-bold mb-2">{t.payment.reportQueued}</h3>
+                    <p className="text-slate-500 text-sm mb-4">
+                      {t.payment.reportQueuedDesc} <strong className="text-slate-700">{emailForPdf}</strong> {t.payment.within15min}
+                    </p>
+                    <p className="text-slate-400 text-xs mb-4">{t.payment.checkSpam}</p>
+                    {pdfContent && (
+                      <>
+                        <div className="border-t border-slate-200 pt-4 mt-4">
+                          <p className="text-slate-500 text-xs mb-3">{t.payment.meanwhileDownload}</p>
+                          <label className={`flex items-start gap-3 p-3 rounded-lg border mb-3 cursor-pointer transition-colors ${
+                            disclaimerAccepted ? 'bg-emerald-50 border-emerald-300' : 'bg-slate-50 border-slate-200 hover:border-slate-300'
+                          }`}>
+                            <input type="checkbox" checked={disclaimerAccepted} onChange={(e) => setDisclaimerAccepted(e.target.checked)}
+                              className="mt-0.5 w-4 h-4 text-emerald-600 border-slate-300 rounded focus:ring-emerald-500 flex-shrink-0" />
+                            <span className="text-slate-600 text-xs leading-relaxed">{t.payment.partialDisclaimer}</span>
+                          </label>
+                          <button onClick={handleDownloadPDF} disabled={!disclaimerAccepted}
+                            className={`w-full font-bold py-3 rounded-xl transition-colors flex items-center justify-center gap-2 text-sm ${
+                              disclaimerAccepted ? 'bg-slate-600 hover:bg-slate-700 text-white cursor-pointer' : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                          }`}>
+                            {t.payment.downloadPartial}
+                          </button>
+                        </div>
+                      </>
+                    )}
+                    <button onClick={() => setShowPaymentModal(false)}
+                      className="mt-4 text-slate-400 hover:text-slate-600 text-sm transition-colors">{t.payment.close}</button>
+                  </>
+                ) : (
+                  /* Email collection form */
+                  <>
+                    <div className="w-16 h-16 bg-amber-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                      <svg className="w-8 h-8 text-amber-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                      </svg>
+                    </div>
+                    <h3 className="text-slate-900 text-xl font-bold mb-2">{t.payment.almostThere}</h3>
+                    <p className="text-slate-500 text-sm mb-2">
+                      {language === 'nl' ? 'Onze AI ervaart hoge vraag en kon je volledige 8-sectierapport niet in realtime voltooien.' : 'Our AI is experiencing high demand and couldn\'t complete your full 8-section report in real time.'}
+                    </p>
+                    <p className="text-slate-600 text-sm font-medium mb-5">
+                      {t.payment.emailGuarantee}
+                    </p>
+                    <div className="text-left mb-4">
+                      <label className="block text-slate-600 text-xs font-medium mb-1.5">{t.payment.emailAddress}</label>
+                      <input 
+                        type="email" 
+                        value={emailForPdf}
+                        onChange={(e) => setEmailForPdf(e.target.value)}
+                        placeholder="you@example.com"
+                        className="w-full border border-slate-300 rounded-lg px-4 py-2.5 text-sm text-slate-900 focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 outline-none"
+                      />
+                    </div>
+                    <button
+                      onClick={handleEmailSubmit}
+                      disabled={emailSubmitting || !emailForPdf.includes('@')}
+                      className={`w-full font-bold py-4 rounded-xl transition-colors flex items-center justify-center gap-2 text-lg ${
+                        emailForPdf.includes('@') && !emailSubmitting
+                          ? 'bg-emerald-600 hover:bg-emerald-700 text-white cursor-pointer'
+                          : 'bg-slate-300 text-slate-500 cursor-not-allowed'
+                      }`}
+                    >
+                      {emailSubmitting ? (
+                        <>
+                          <svg className="animate-spin w-5 h-5" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                          </svg>
+                          {t.payment.submitting}
+                        </>
+                      ) : (
+                        <>
+                          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 8l7.89 5.26a2 2 0 002.22 0L21 8M5 19h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+                          </svg>
+                          {t.payment.sendReport}
+                        </>
+                      )}
+                    </button>
+                    {pdfContent && (
+                      <div className="border-t border-slate-200 pt-3 mt-4">
+                        <p className="text-slate-400 text-xs mb-2">{t.payment.orDownloadPartial}</p>
+                        <button onClick={() => { setDisclaimerAccepted(true); setPdfReady(true); }}
+                          className="text-emerald-600 hover:text-emerald-700 text-sm font-medium transition-colors underline">
+                          {t.payment.downloadPartialLink} ({(pdfContent.match(/## SECTION/gi) || []).length}/8 {t.payment.sections})
+                        </button>
+                      </div>
+                    )}
+                    <button onClick={() => setShowPaymentModal(false)}
+                      className="mt-3 text-slate-400 hover:text-slate-600 text-sm transition-colors">{t.payment.close}</button>
+                  </>
+                )}
+              </>
+            ) : pdfGenerating ? (
               /* PDF Generation in Progress */
               <>
                 <div className="w-16 h-16 bg-blue-100 rounded-full flex items-center justify-center mx-auto mb-4">
@@ -1654,8 +1915,15 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                   </svg>
                 </div>
-                <h3 className="text-slate-900 text-xl font-bold mb-2">Generating Your Premium Report...</h3>
-                <p className="text-slate-500 text-sm mb-4">Our AI is creating your personalized 8-section wealth strategy with Dutch tax optimization, geo-arbitrage analysis, and retirement simulation.</p>
+                <h3 className="text-slate-900 text-xl font-bold mb-2">
+                  {pdfRetryCount > 0 ? `${t.loading.retrying} ${pdfRetryCount + 1} ${t.loading.of} 3)` : t.loading.generating}
+                </h3>
+                <p className="text-slate-500 text-sm mb-4">
+                  {pdfRetryCount > 0 
+                    ? 'The AI is working on delivering a complete 8-section report. This may take a moment...'
+                    : 'Our AI is creating your personalized 8-section wealth strategy with Dutch tax optimization, geo-arbitrage analysis, and retirement simulation.'
+                  }
+                </p>
                 <div className="space-y-2 text-left max-w-xs mx-auto">
                   {['Wealth Shield & 2028 Prep', 'Pension Audit (Pillar 1-3)', 'Real Estate Optimization', 'Family Wealth Transfer', 'Global Retirement (10 countries)', 'Bridge Phase Strategy', 'Final Verdict & Simulation'].map((item, i) => (
                     <div key={i} className="flex items-center gap-2 text-xs text-slate-500">
@@ -1676,7 +1944,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   </svg>
                 </div>
                 <h3 className="text-slate-900 text-xl font-bold mb-2">
-                  {pdfReady ? 'Your Premium Report is Ready!' : 'Payment Successful!'}
+                  {pdfReady ? t.payment.reportReady : t.payment.paymentSuccessful}
                 </h3>
                 <p className="text-slate-500 text-sm mb-5">
                   {pdfReady 
@@ -1721,7 +1989,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   onClick={() => setShowPaymentModal(false)}
                   className="mt-3 text-slate-400 hover:text-slate-600 text-sm transition-colors"
                 >
-                  Close
+                  {t.payment.close}
                 </button>
               </>
             )}
@@ -1732,11 +2000,11 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             {/* Order Summary */}
             <div className="bg-slate-50 rounded-xl p-4 mb-6">
               <div className="flex items-center justify-between mb-2">
-                <span className="text-slate-700 font-medium text-sm">AI Wealth Strategy PDF</span>
+                <span className="text-slate-700 font-medium text-sm">{t.payment.aiWealthPdf}</span>
                 <span className="text-slate-400 line-through text-sm">€99</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-emerald-600 text-xs font-medium">Launch discount (80% off)</span>
+                <span className="text-emerald-600 text-xs font-medium">{t.payment.launchDiscount}</span>
                 <span className="text-slate-900 font-bold text-xl">€19.99</span>
               </div>
             </div>
@@ -1744,7 +2012,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             {/* Mock Card Form */}
             <div className="space-y-4 mb-6">
               <div>
-                <label className="block text-slate-600 text-xs font-medium mb-1.5">Email</label>
+                <label className="block text-slate-600 text-xs font-medium mb-1.5">{t.payment.email}</label>
                 <input 
                   type="email" 
                   placeholder="you@example.com"
@@ -1752,7 +2020,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 />
               </div>
               <div>
-                <label className="block text-slate-600 text-xs font-medium mb-1.5">Card number</label>
+                <label className="block text-slate-600 text-xs font-medium mb-1.5">{t.payment.cardNumber}</label>
                 <div className="relative">
                   <input 
                     type="text" 
@@ -1767,7 +2035,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-slate-600 text-xs font-medium mb-1.5">Expiry</label>
+                  <label className="block text-slate-600 text-xs font-medium mb-1.5">{t.payment.expiry}</label>
                   <input 
                     type="text" 
                     placeholder="MM / YY"
@@ -1775,7 +2043,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-600 text-xs font-medium mb-1.5">CVC</label>
+                  <label className="block text-slate-600 text-xs font-medium mb-1.5">{t.payment.cvc}</label>
                   <input 
                     type="text" 
                     placeholder="123"
@@ -1815,19 +2083,19 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
                 </svg>
-                SSL Encrypted
+                {t.payment.sslEncrypted}
               </div>
               <div className="flex items-center gap-1">
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                 </svg>
-                Powered by Stripe
+                {t.payment.poweredByStripe}
               </div>
               <div className="flex items-center gap-1">
                 <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H6a3 3 0 00-3 3v8a3 3 0 003 3z" />
                 </svg>
-                Secure Payment
+                {t.payment.securePayment}
               </div>
             </div>
           </div>
@@ -1839,7 +2107,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
   // ===== Disclaimer Page =====
   if (showDisclaimer) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 text-white">
+      <div className={`${pageBg} text-white`}>
         {paymentModal}
         {/* Header */}
         <div className="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-md border-b border-slate-800">
@@ -1849,9 +2117,18 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
             >
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
-              <span className="text-sm font-medium">Back to Home</span>
+              <span className="text-sm font-medium">{t.disclaimer.backToHome}</span>
             </button>
-            <span className="text-sm text-slate-500 font-medium tracking-wider uppercase">VrijWealth</span>
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-slate-500 font-medium tracking-wider uppercase">VrijWealth</span>
+              <button onClick={toggleDarkMode} className="text-slate-400 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-slate-800" title={darkMode ? 'Light mode' : 'Dark mode'}>
+                {darkMode ? (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>
+                )}
+              </button>
+            </div>
           </div>
         </div>
 
@@ -1861,10 +2138,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
           <div className="text-center mb-12">
             <div className="inline-flex items-center gap-2 bg-amber-500/10 border border-amber-500/20 rounded-full px-4 py-1.5 mb-6">
               <svg className="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 9v2m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" /></svg>
-              <span className="text-xs font-semibold text-amber-400 tracking-wider uppercase">Legal Notice</span>
+              <span className="text-xs font-semibold text-amber-400 tracking-wider uppercase">{t.disclaimer.legalNotice}</span>
             </div>
             <h1 className="text-3xl sm:text-4xl font-bold bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent mb-4">
-              Disclaimer & Important Information
+              {t.disclaimer.title}
             </h1>
             <p className="text-slate-400 max-w-2xl mx-auto">
               Please read the following information carefully before using VrijWealth services.
@@ -1880,9 +2157,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <span className="text-blue-400 font-bold text-lg">1</span>
                 </div>
                 <div>
-                  <h2 className="text-xl font-semibold text-white mb-3">Nature of Service</h2>
+                  <h2 className="text-xl font-semibold text-white mb-3">{t.disclaimer.natureOfService}</h2>
                   <p className="text-slate-300 leading-relaxed">
-                    VrijAI is an AI-powered informational tool developed by Vrij Wealth. It is designed to provide general financial insights and educational content only. VrijAI does not provide personalised financial advice, investment recommendations, or tax planning services.
+                    {t.disclaimer.natureText}
                   </p>
                 </div>
               </div>
@@ -1895,9 +2172,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <span className="text-emerald-400 font-bold text-lg">2</span>
                 </div>
                 <div>
-                  <h2 className="text-xl font-semibold text-white mb-3">Not Financial Advice</h2>
+                  <h2 className="text-xl font-semibold text-white mb-3">{t.disclaimer.notAdvice}</h2>
                   <p className="text-slate-300 leading-relaxed">
-                    The outputs generated by VrijAI — including projections, scenarios, tax estimates, and commentary — are for informational and illustrative purposes only. They do not constitute financial advice, legal advice, tax advice, or any form of regulated advisory service under Dutch or EU financial regulations (including MiFID II and the Wet op het financieel toezicht, "Wft").
+                    {t.disclaimer.notAdviceText}
                   </p>
                 </div>
               </div>
@@ -1910,9 +2187,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <span className="text-amber-400 font-bold text-lg">3</span>
                 </div>
                 <div>
-                  <h2 className="text-xl font-semibold text-white mb-3">Accuracy & Risk</h2>
+                  <h2 className="text-xl font-semibold text-white mb-3">{t.disclaimer.accuracy}</h2>
                   <p className="text-slate-300 leading-relaxed">
-                    While we strive to maintain accurate and up-to-date models, VrijAI may produce outputs that are incomplete, outdated, or incorrect. AI-generated content should never be used as the sole basis for any financial, investment, or tax-related decision. All financial decisions involve risk, including the risk of loss. Past performance or projected outcomes are not indicative of future results.
+                    {t.disclaimer.accuracyText}
                   </p>
                 </div>
               </div>
@@ -1925,9 +2202,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <span className="text-purple-400 font-bold text-lg">4</span>
                 </div>
                 <div>
-                  <h2 className="text-xl font-semibold text-white mb-3">Mandatory Verification</h2>
+                  <h2 className="text-xl font-semibold text-white mb-3">{t.disclaimer.verification}</h2>
                   <p className="text-slate-300 leading-relaxed">
-                    Users are strongly encouraged to consult a licensed financial adviser, tax professional, or legal expert before acting on any information provided by VrijAI. By using this tool, you acknowledge and accept that Vrij Wealth and its affiliates bear no liability for decisions made based on VrijAI outputs.
+                    {t.disclaimer.verificationText}
                   </p>
                 </div>
               </div>
@@ -1951,10 +2228,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
   // ===== Box 3 Detailed Comparison Page =====
   if (showBox3Comparison) {
     const portfolioProfiles = {
-      conservative: { label: 'Conservative', emoji: '🛡', nominal: 0.05, color: 'red' },
-      balanced: { label: 'Balanced', emoji: '⚖️', nominal: 0.07, color: 'orange' },
-      growth: { label: 'Growth', emoji: '📈', nominal: 0.09, color: 'indigo' },
-      aggressive: { label: 'Aggressive', emoji: '🚀', nominal: 0.12, color: 'purple' },
+      conservative: { label: t.box3.conservative, emoji: '🛡', nominal: 0.05, color: 'red' },
+      balanced: { label: t.box3.balanced, emoji: '⚖️', nominal: 0.07, color: 'orange' },
+      growth: { label: t.box3.growth, emoji: '📈', nominal: 0.09, color: 'indigo' },
+      aggressive: { label: t.box3.aggressive, emoji: '🚀', nominal: 0.12, color: 'purple' },
     };
     const profile = portfolioProfiles[box3PortfolioType];
     const nominalReturn = profile.nominal;
@@ -2100,7 +2377,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
       return (
         <div className="bg-slate-800/40 backdrop-blur-sm rounded-xl p-4 border border-slate-700">
-          <h4 className="text-white font-bold text-sm mb-3">Portfolio Projection</h4>
+          <h4 className="text-white font-bold text-sm mb-3">{t.box3.portfolioProjection}</h4>
           <svg viewBox={`0 0 ${chartW} ${chartH}`} className="w-full" style={{ maxHeight: 300 }}>
             <defs>
               <linearGradient id={`${uid}-invested`} x1="0" y1="0" x2="0" y2="1">
@@ -2156,14 +2433,14 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 </text>
               );
             })}
-            <text x={chartW / 2} y={baseY + 30} fontSize="10" fill="#94a3b8" textAnchor="middle">Age</text>
+            <text x={chartW / 2} y={baseY + 30} fontSize="10" fill="#94a3b8" textAnchor="middle">{t.box3.ageAxis}</text>
           </svg>
           {/* Legend */}
           <div className="flex flex-wrap gap-4 mt-3 justify-center">
             {[
-              { color: '#34d399', label: 'Invested' },
-              { color: '#60a5fa', label: 'Gains' },
-              { color: '#c084fc', label: 'Cumulative Tax' },
+              { color: '#34d399', label: t.box3.invested },
+              { color: '#60a5fa', label: t.box3.gains },
+              { color: '#c084fc', label: t.box3.cumulativeTax },
             ].map((item, i) => (
               <div key={i} className="flex items-center gap-1.5 text-xs text-slate-400">
                 <div className="w-3 h-3 rounded-sm" style={{ backgroundColor: item.color, opacity: 0.8 }}></div>
@@ -2172,7 +2449,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             ))}
             <div className="flex items-center gap-1.5 text-xs text-slate-400">
               <div className="w-4 border-t-2 border-dashed border-red-400"></div>
-              FIRE Age
+              {t.box3.fireAgeLabel}
             </div>
           </div>
         </div>
@@ -2183,34 +2460,43 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
     return (
       <>
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+      <div className={pageBg}>
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
-          {/* Back Button */}
-          <button
-            onClick={() => setShowBox3Comparison(false)}
-            className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors mb-6"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
-            Back to Home
-          </button>
+          {/* Top row: Back + Toggle */}
+          <div className="flex items-center justify-between mb-6">
+            <button
+              onClick={() => setShowBox3Comparison(false)}
+              className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+              </svg>
+              {t.box3.backToHome}
+            </button>
+            <button onClick={toggleDarkMode} className="text-slate-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-slate-800" title={darkMode ? 'Light mode' : 'Dark mode'}>
+              {darkMode ? (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+              ) : (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>
+              )}
+            </button>
+          </div>
 
           {/* Header */}
           <div className="mb-8">
-            <h1 className="text-3xl font-bold text-white mb-2">NL Box 3 Taxes: current vs proposed</h1>
-            <p className="text-slate-400">Compare current NL Box 3 (deemed return) vs proposed 2028 (actual gains) and see impact on total tax and FIRE timeline.</p>
+            <h1 className="text-3xl font-bold text-white mb-2">{t.box3.title}</h1>
+            <p className="text-slate-400">{t.box3.compareDesc}</p>
           </div>
 
           {/* Your Plan Summary — Editable */}
           <div className="bg-slate-800/40 backdrop-blur-sm border border-indigo-500/30 rounded-2xl p-6 mb-8">
             <div className="flex items-center gap-2 mb-4">
               <span className="text-lg">📋</span>
-              <h3 className="text-lg font-bold text-white">Your plan in this comparison</h3>
+              <h3 className="text-lg font-bold text-white">{t.box3.yourPlan}</h3>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4 mb-4">
               <div className="bg-slate-700/40 rounded-xl p-4 border border-slate-600">
-                <label className="block text-slate-400 text-xs font-medium mb-1">Monthly Savings</label>
+                <label className="block text-slate-400 text-xs font-medium mb-1">{t.box3.monthlySavings}</label>
                 <div className="flex items-center gap-1">
                   <span className="text-slate-400 text-lg">€</span>
                   <input
@@ -2221,10 +2507,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     className="w-full bg-transparent text-white font-bold text-xl outline-none"
                   />
                 </div>
-                <p className="text-slate-500 text-xs mt-1">€{(box3MonthlySavings * 12).toLocaleString()}/year</p>
+                <p className="text-slate-500 text-xs mt-1">€{(box3MonthlySavings * 12).toLocaleString()}{t.box3.perYear}</p>
               </div>
               <div className="bg-slate-700/40 rounded-xl p-4 border border-slate-600">
-                <label className="block text-slate-400 text-xs font-medium mb-1">Starting Capital</label>
+                <label className="block text-slate-400 text-xs font-medium mb-1">{t.box3.startingCapital}</label>
                 <div className="flex items-center gap-1">
                   <span className="text-slate-400 text-lg">€</span>
                   <input
@@ -2235,10 +2521,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     className="w-full bg-transparent text-white font-bold text-xl outline-none"
                   />
                 </div>
-                <p className="text-slate-500 text-xs mt-1">Current portfolio value</p>
+                <p className="text-slate-500 text-xs mt-1">{t.box3.currentPortfolioValue}</p>
               </div>
               <div className="bg-slate-700/40 rounded-xl p-4 border border-slate-600">
-                <label className="block text-slate-400 text-xs font-medium mb-1">Desired Pension (annual)</label>
+                <label className="block text-slate-400 text-xs font-medium mb-1">{t.box3.desiredPension}</label>
                 <div className="flex items-center gap-1">
                   <span className="text-slate-400 text-lg">€</span>
                   <input
@@ -2249,12 +2535,12 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     className="w-full bg-transparent text-white font-bold text-xl outline-none"
                   />
                 </div>
-                <p className="text-slate-500 text-xs mt-1">€{Math.round(annualWithdraw / 12).toLocaleString()}/month in today's money</p>
+                <p className="text-slate-500 text-xs mt-1">€{Math.round(annualWithdraw / 12).toLocaleString()}{t.box3.perMonthToday}</p>
               </div>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
               <div className="bg-slate-700/40 rounded-xl p-4 border border-slate-600">
-                <label className="block text-slate-400 text-xs font-medium mb-1">FIRE Age</label>
+                <label className="block text-slate-400 text-xs font-medium mb-1">{t.box3.fireAge}</label>
                 <input
                   type="number" onFocus={handleInputFocus}
                   min="30" max="70" step="1"
@@ -2262,10 +2548,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   onChange={(e) => setBox3FireAge(Number(e.target.value))}
                   className="w-full bg-transparent text-white font-bold text-xl outline-none"
                 />
-                <p className="text-slate-500 text-xs mt-1">When you want to retire</p>
+                <p className="text-slate-500 text-xs mt-1">{t.box3.whenRetire}</p>
               </div>
               <div className="bg-slate-700/40 rounded-xl p-4 border border-slate-600">
-                <label className="block text-slate-400 text-xs font-medium mb-1">Life Expectancy</label>
+                <label className="block text-slate-400 text-xs font-medium mb-1">{t.box3.lifeExpectancy}</label>
                 <input
                   type="number" onFocus={handleInputFocus}
                   min="60" max="100" step="1"
@@ -2273,12 +2559,12 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   onChange={(e) => setBox3LifeExpectancy(Number(e.target.value))}
                   className="w-full bg-transparent text-white font-bold text-xl outline-none"
                 />
-                <p className="text-slate-500 text-xs mt-1">Plan until this age</p>
+                <p className="text-slate-500 text-xs mt-1">{t.box3.planUntilAge}</p>
               </div>
             </div>
             <div className="inline-flex items-center gap-2 bg-slate-700/30 rounded-full px-4 py-2 border border-slate-600">
               <span className="text-indigo-400">◎</span>
-              <span className="text-slate-300 text-sm">Target portfolio: <strong className="text-white">€{Math.round(annualWithdraw / 0.05).toLocaleString()}</strong> (using a 5% withdrawal rate).</span>
+              <span className="text-slate-300 text-sm">{t.box3.targetPortfolio}: <strong className="text-white">€{Math.round(annualWithdraw / 0.05).toLocaleString()}</strong> ({t.box3.withdrawalRate}).</span>
             </div>
           </div>
 
@@ -2286,7 +2572,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 mb-8">
             {/* Simulation Mode */}
             <div>
-              <label className="block text-slate-300 font-medium text-sm mb-2">Simulation mode</label>
+              <label className="block text-slate-300 font-medium text-sm mb-2">{t.box3.simulationMode}</label>
               <div className="flex gap-2">
                 {['deterministic', 'monteCarlo'].map(mode => (
                   <button
@@ -2298,7 +2584,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         : 'bg-slate-800 text-slate-300 border border-slate-600 hover:bg-slate-700'
                     }`}
                   >
-                    {mode === 'deterministic' ? 'Deterministic' : 'Monte Carlo'}
+                    {mode === 'deterministic' ? t.box3.deterministic : t.box3.monteCarlo}
                   </button>
                 ))}
               </div>
@@ -2306,7 +2592,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
             {/* Portfolio Type */}
             <div>
-              <label className="block text-slate-300 font-medium text-sm mb-2">Portfolio type</label>
+              <label className="block text-slate-300 font-medium text-sm mb-2">{t.box3.portfolioType}</label>
               <div className="flex gap-2 flex-wrap">
                 {Object.entries(portfolioProfiles).map(([key, p]) => (
                   <button
@@ -2330,14 +2616,14 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             <div>
               <div className="flex items-center gap-2 mb-3">
                 <span className="w-3 h-3 rounded-full bg-blue-600"></span>
-                <span className="text-slate-300 font-medium text-sm">NL: Box3 Taxes (2026)</span>
+                <span className="text-slate-300 font-medium text-sm">{t.box3.current2026}</span>
               </div>
               {renderChart(sim2026, globalMax, '2026')}
             </div>
             <div>
               <div className="flex items-center gap-2 mb-3">
                 <span className="w-3 h-3 rounded-full bg-red-500"></span>
-                <span className="text-slate-300 font-medium text-sm">NL: Box3 Taxes (2028 - Proposed)</span>
+                <span className="text-slate-300 font-medium text-sm">{t.box3.proposed2028}</span>
               </div>
               {renderChart(sim2028, globalMax, '2028')}
             </div>
@@ -2345,47 +2631,47 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
           {/* Impact Summary */}
           <div className="mb-10">
-            <h2 className="text-xl font-bold text-white mb-4">Impact Summary</h2>
+            <h2 className="text-xl font-bold text-white mb-4">{t.box3.impactSummary}</h2>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
               {/* FIRE Delayed */}
-              <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-6">
+              <div className={`${cardClass} rounded-2xl p-6`}>
                 <div className="flex items-center gap-2 mb-3">
                   <div className="w-8 h-8 bg-orange-500/20 rounded-full flex items-center justify-center">
                     <span className="text-orange-400 text-sm">⏱</span>
                   </div>
-                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">FIRE Delayed By</span>
+                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">{t.box3.fireDelayed}</span>
                 </div>
-                <p className="text-4xl font-black text-orange-400 mb-1">+ {fireDelay.toFixed(1)} <span className="text-lg font-medium text-slate-500">years</span></p>
+                <p className="text-4xl font-black text-orange-400 mb-1">+ {fireDelay.toFixed(1)} <span className="text-lg font-medium text-slate-500">{t.box3.yearsLabel}</span></p>
                 <p className="text-slate-400 text-xs mt-2">
-                  With nl: box3 taxes (2028 - proposed), you'll need to work <strong className="text-slate-300">{fireDelay.toFixed(1)} years longer</strong> to reach FIRE.
+                  {t.box3.withProposed}, <strong className="text-slate-300">{fireDelay.toFixed(1)} {t.box3.needWorkLonger}</strong>
                 </p>
               </div>
 
               {/* Additional Investment */}
-              <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-6">
+              <div className={`${cardClass} rounded-2xl p-6`}>
                 <div className="flex items-center gap-2 mb-3">
                   <div className="w-8 h-8 bg-emerald-500/20 rounded-full flex items-center justify-center">
                     <span className="text-emerald-400 text-sm">◎</span>
                   </div>
-                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Additional Investment Needed</span>
+                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">{t.box3.additionalInvestment}</span>
                 </div>
                 <p className="text-4xl font-black text-emerald-400 mb-1">+ €{additionalInvestment.toFixed(1)}K</p>
                 <p className="text-slate-400 text-xs mt-2">
-                  NL: Box3 Taxes (2028 - Proposed) requires you to save <strong className="text-slate-300">€{additionalInvestment.toFixed(1)}K more</strong> to reach your FIRE target.
+                  {t.box3.proposed2028} {t.box3.requiresSave} <strong className="text-slate-300">€{additionalInvestment.toFixed(1)}K {t.box3.needSaveMore}</strong>
                 </p>
               </div>
 
               {/* Additional Years */}
-              <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-6">
+              <div className={`${cardClass} rounded-2xl p-6`}>
                 <div className="flex items-center gap-2 mb-3">
                   <div className="w-8 h-8 bg-blue-500/20 rounded-full flex items-center justify-center">
                     <span className="text-blue-400 text-sm">📅</span>
                   </div>
-                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">Additional Years Investing</span>
+                  <span className="text-slate-400 text-xs font-bold uppercase tracking-wider">{t.box3.additionalYears}</span>
                 </div>
-                <p className="text-4xl font-black text-blue-400 mb-1">+ {fireDelay.toFixed(1)} <span className="text-lg font-medium text-slate-500">years</span></p>
+                <p className="text-4xl font-black text-blue-400 mb-1">+ {fireDelay.toFixed(1)} <span className="text-lg font-medium text-slate-500">{t.box3.yearsLabel}</span></p>
                 <p className="text-slate-400 text-xs mt-2">
-                  You'll need to invest for <strong className="text-slate-300">{fireDelay.toFixed(1)} more years</strong> with nl: box3 taxes (2028 - proposed).
+                  <strong className="text-slate-300">{fireDelay.toFixed(1)} {t.box3.needInvestMore}</strong> {t.box3.withProposed}.
                 </p>
               </div>
             </div>
@@ -2400,25 +2686,25 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <span className="text-slate-300 text-sm">⏰</span>
                 </div>
                 <div>
-                  <h4 className="text-white font-bold text-sm">FIRE Age</h4>
-                  <p className="text-slate-500 text-xs">When you can retire</p>
+                  <h4 className="text-white font-bold text-sm">{t.box3.fireAgeLabel}</h4>
+                  <p className="text-slate-500 text-xs">{t.box3.whenCanRetire}</p>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
-                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2026)</p>
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">{t.box3.current2026}</p>
                   <p className="text-4xl font-black text-blue-400">{sim2026.fireAge}</p>
                   <p className="text-slate-500 text-xs">({2026 + (sim2026.fireAge - currentAge)})</p>
                 </div>
                 <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
-                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2028 - Proposed)</p>
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">{t.box3.proposed2028}</p>
                   <p className="text-4xl font-black text-red-400">{sim2028.fireAge}</p>
                   <p className="text-slate-500 text-xs">({2026 + (sim2028.fireAge - currentAge)})</p>
                 </div>
               </div>
               <div className="mt-3 bg-slate-700/20 rounded-lg p-2 border border-slate-600/50">
                 <p className="text-slate-400 text-xs">
-                  With <strong className="text-slate-300">nl: box3 taxes (2026)</strong>, you can retire at age {sim2026.fireAge}. With <strong className="text-slate-300">NL: Box3 Taxes (2028 - proposed)</strong>, you'll need to work until age {sim2028.fireAge}.
+                  {t.box3.withCurrent}, <strong className="text-slate-300">{t.box3.canRetireAt} {sim2026.fireAge}</strong>. {t.box3.withProposed}, <strong className="text-slate-300">{t.box3.workUntilAge} {sim2028.fireAge}</strong>.
                 </p>
               </div>
             </div>
@@ -2430,25 +2716,25 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <span className="text-slate-300 text-sm">🏛</span>
                 </div>
                 <div>
-                  <h4 className="text-white font-bold text-sm">Tax Paid</h4>
-                  <p className="text-slate-500 text-xs">Total tax over journey and per €100 gained</p>
+                  <h4 className="text-white font-bold text-sm">{t.box3.taxPaid}</h4>
+                  <p className="text-slate-500 text-xs">{t.box3.totalTaxDesc}</p>
                 </div>
               </div>
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
-                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2026)</p>
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">{t.box3.current2026}</p>
                   <p className="text-2xl font-black text-blue-400">€{Math.round(sim2026.totalTax).toLocaleString()}</p>
-                  <p className="text-slate-500 text-xs">Tax · {sim2026.totalGains > 0 ? (sim2026.totalTax / sim2026.totalGains * 100).toFixed(1) : '0'} € per €100 gained</p>
+                  <p className="text-slate-500 text-xs">{t.box3.tax} · {sim2026.totalGains > 0 ? (sim2026.totalTax / sim2026.totalGains * 100).toFixed(1) : '0'} {t.box3.perHundredGained}</p>
                 </div>
                 <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
-                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2028 - Proposed)</p>
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">{t.box3.proposed2028}</p>
                   <p className="text-2xl font-black text-red-400">€{Math.round(sim2028.totalTax).toLocaleString()}</p>
-                  <p className="text-slate-500 text-xs">Tax · {sim2028.totalGains > 0 ? (sim2028.totalTax / sim2028.totalGains * 100).toFixed(1) : '0'} € per €100 gained</p>
+                  <p className="text-slate-500 text-xs">{t.box3.tax} · {sim2028.totalGains > 0 ? (sim2028.totalTax / sim2028.totalGains * 100).toFixed(1) : '0'} {t.box3.perHundredGained}</p>
                 </div>
               </div>
               <div className="mt-3 bg-slate-700/20 rounded-lg p-2 border border-slate-600/50">
                 <p className="text-slate-400 text-xs">
-                  With <strong className="text-slate-300">NL: Box3 Taxes (2028 - Proposed)</strong> you pay <strong className="text-slate-300">€{Math.round(taxDiff).toLocaleString()} more</strong> in tax over lifetime.
+                  {t.box3.withProposed} <strong className="text-slate-300">€{Math.round(taxDiff).toLocaleString()} {t.box3.payMore}</strong>
                 </p>
               </div>
             </div>
@@ -2460,23 +2746,23 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <span className="text-slate-300 text-sm">💲</span>
                 </div>
                 <div>
-                  <h4 className="text-white font-bold text-sm">Annual Withdrawal at FIRE</h4>
-                  <p className="text-slate-500 text-xs">How your current lifestyle translates at retirement</p>
+                  <h4 className="text-white font-bold text-sm">{t.box3.annualWithdrawal}</h4>
+                  <p className="text-slate-500 text-xs">{t.box3.howLifestyle}</p>
                 </div>
               </div>
               <p className="text-slate-400 text-xs mb-3">
-                Your current lifestyle of <strong className="text-slate-300">€{annualWithdraw.toLocaleString()}/year</strong> (today's money) will become:
+                €{annualWithdraw.toLocaleString()}{t.box3.perYear} {t.box3.todaysMoney}
               </p>
               <div className="grid grid-cols-2 gap-3">
                 <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
-                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2026)</p>
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">{t.box3.current2026}</p>
                   <p className="text-2xl font-black text-blue-400">€{withdrawAtFire2026.toLocaleString()}</p>
-                  <p className="text-slate-500 text-xs">After {yearsToFire2026} years (current Box 3)</p>
+                  <p className="text-slate-500 text-xs">{t.box3.afterYears} {yearsToFire2026} {t.box3.yearsCurrent}</p>
                 </div>
                 <div className="bg-slate-700/30 rounded-xl p-3 text-center border border-slate-600">
-                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">NL: Box3 Taxes (2028 - Proposed)</p>
+                  <p className="text-slate-400 text-[10px] font-bold uppercase mb-1">{t.box3.proposed2028}</p>
                   <p className="text-2xl font-black text-red-400">€{withdrawAtFire2028.toLocaleString()}</p>
-                  <p className="text-slate-500 text-xs">After {yearsToFire2028} years (proposed 2028)</p>
+                  <p className="text-slate-500 text-xs">{t.box3.afterYears} {yearsToFire2028} {t.box3.yearsProposed}</p>
                 </div>
               </div>
             </div>
@@ -2484,13 +2770,13 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
           {/* CTA */}
           <div className="bg-gradient-to-r from-indigo-600 to-purple-600 rounded-2xl p-8 text-center mb-8">
-            <h2 className="text-2xl font-bold text-white mb-3">Want a personalized strategy to minimize your 2028 tax impact?</h2>
-            <p className="text-indigo-100 mb-6">Get your full AI-powered wealth strategy with Dutch tax optimization</p>
+            <h2 className="text-2xl font-bold text-white mb-3">{t.box3.ctaTitle}</h2>
+            <p className="text-indigo-100 mb-6">{t.box3.ctaSubtitle}</p>
             <button
               onClick={() => { setShowBox3Comparison(false); setShowQuestionnaire(true); setCurrentStep('household'); }}
               className="bg-white hover:bg-indigo-50 text-indigo-600 font-bold px-8 py-4 rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105 text-lg"
             >
-              Get Your Strategy →
+              {t.box3.getStrategy}
             </button>
           </div>
         </div>
@@ -2504,26 +2790,35 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
   if (showComparison) {
     return (
       <>
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+      <div className={pageBg}>
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
-          {/* Back Button */}
-          <button
-            onClick={() => setShowComparison(false)}
-            className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors mb-8"
-          >
-            <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
-            </svg>
-            Back to Results
-          </button>
+          {/* Top row: Back + Toggle */}
+          <div className="flex items-center justify-between mb-8">
+            <button
+              onClick={() => setShowComparison(false)}
+              className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
+              </svg>
+              {t.comparison.backToResults}
+            </button>
+            <button onClick={toggleDarkMode} className="text-slate-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-slate-800" title={darkMode ? 'Light mode' : 'Dark mode'}>
+              {darkMode ? (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+              ) : (
+                <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>
+              )}
+            </button>
+          </div>
 
           {/* Header */}
           <div className="text-center mb-12">
-            <h1 className="text-4xl sm:text-5xl font-bold text-white mb-4">
-              Why Choose AI-Powered Strategy?
+            <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white mb-4">
+              {t.comparison.whyChoose}
             </h1>
             <p className="text-slate-400 text-lg max-w-2xl mx-auto">
-              Compare the modern approach with traditional financial advisory
+              {t.comparison.compareSubtitle}
             </p>
           </div>
 
@@ -2533,67 +2828,67 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               <table className="w-full">
                 <thead>
                   <tr className="bg-gradient-to-r from-emerald-600 to-teal-600">
-                    <th className="px-6 py-4 text-left text-white font-bold text-lg">Feature</th>
+                    <th className="px-6 py-4 text-left text-white font-bold text-lg">{t.comparison.feature}</th>
                     <th className="px-6 py-4 text-center text-white font-bold text-lg">
                       <div className="flex items-center justify-center gap-2">
                         <svg className="w-5 h-5" fill="currentColor" viewBox="0 0 20 20">
                           <path d="M9.049 2.927c.3-.921 1.603-.921 1.902 0l1.07 3.292a1 1 0 00.95.69h3.462c.969 0 1.371 1.24.588 1.81l-2.8 2.034a1 1 0 00-.364 1.118l1.07 3.292c.3.921-.755 1.688-1.54 1.118l-2.8-2.034a1 1 0 00-1.175 0l-2.8 2.034c-.784.57-1.838-.197-1.539-1.118l1.07-3.292a1 1 0 00-.364-1.118L2.98 8.72c-.783-.57-.38-1.81.588-1.81h3.461a1 1 0 00.951-.69l1.07-3.292z" />
                         </svg>
-                        Your AI Strategy PDF
+                        {t.comparison.aiStrategy}
                       </div>
                     </th>
-                    <th className="px-6 py-4 text-center text-white font-bold text-lg">Traditional NL Advisor</th>
+                    <th className="px-6 py-4 text-center text-white font-bold text-lg">{t.comparison.traditionalAdvisor}</th>
                   </tr>
                 </thead>
                 <tbody>
                   {/* Cost Row */}
                   <tr className="border-b border-slate-200">
-                    <td className="px-6 py-5 font-semibold text-slate-700">Cost</td>
+                    <td className="px-6 py-5 font-semibold text-slate-700">{t.comparison.cost}</td>
                     <td className="px-6 py-5 text-center bg-emerald-50">
                       <div className="text-2xl font-bold text-emerald-600">€29</div>
-                      <div className="text-sm text-slate-600">(Launch Price)</div>
+                      <div className="text-sm text-slate-600">{t.comparison.launchPrice}</div>
                     </td>
                     <td className="px-6 py-5 text-center">
                       <div className="text-2xl font-bold text-slate-900">€1,000+</div>
-                      <div className="text-sm text-slate-600">Average</div>
+                      <div className="text-sm text-slate-600">{t.comparison.average}</div>
                     </td>
                   </tr>
 
                   {/* Speed Row */}
                   <tr className="border-b border-slate-200">
-                    <td className="px-6 py-5 font-semibold text-slate-700">Speed</td>
+                    <td className="px-6 py-5 font-semibold text-slate-700">{t.comparison.speed}</td>
                     <td className="px-6 py-5 text-center bg-emerald-50">
-                      <div className="text-xl font-bold text-emerald-600">⚡ Instant</div>
+                      <div className="text-xl font-bold text-emerald-600">{t.comparison.instant}</div>
                     </td>
                     <td className="px-6 py-5 text-center">
-                      <div className="text-xl font-bold text-slate-900">2-3 Weeks</div>
-                      <div className="text-sm text-slate-600">of Meetings</div>
+                      <div className="text-xl font-bold text-slate-900">{t.comparison.weeks}</div>
+                      <div className="text-sm text-slate-600">{t.comparison.ofMeetings}</div>
                     </td>
                   </tr>
 
                   {/* Accuracy Row */}
                   <tr className="border-b border-slate-200">
-                    <td className="px-6 py-5 font-semibold text-slate-700">Accuracy</td>
+                    <td className="px-6 py-5 font-semibold text-slate-700">{t.comparison.accuracy}</td>
                     <td className="px-6 py-5 text-center bg-emerald-50">
-                      <div className="text-base font-bold text-emerald-600">Data-driven</div>
-                      <div className="text-sm text-slate-600">2026 Tax Logic</div>
+                      <div className="text-base font-bold text-emerald-600">{t.comparison.dataDriven}</div>
+                      <div className="text-sm text-slate-600">{t.comparison.taxLogic}</div>
                     </td>
                     <td className="px-6 py-5 text-center">
-                      <div className="text-base font-bold text-slate-900">Human-manual</div>
-                      <div className="text-sm text-slate-600">Calculation</div>
+                      <div className="text-base font-bold text-slate-900">{t.comparison.humanManual}</div>
+                      <div className="text-sm text-slate-600">{t.comparison.calculation}</div>
                     </td>
                   </tr>
 
                   {/* Focus Row */}
                   <tr>
-                    <td className="px-6 py-5 font-semibold text-slate-700">Focus</td>
+                    <td className="px-6 py-5 font-semibold text-slate-700">{t.comparison.focus}</td>
                     <td className="px-6 py-5 text-center bg-emerald-50">
-                      <div className="text-base font-bold text-emerald-600">10+ Global</div>
-                      <div className="text-sm text-slate-600">Relocation Paths</div>
+                      <div className="text-base font-bold text-emerald-600">{t.comparison.globalPaths}</div>
+                      <div className="text-sm text-slate-600">{t.comparison.relocationPaths}</div>
                     </td>
                     <td className="px-6 py-5 text-center">
-                      <div className="text-base font-bold text-slate-900">Usually NL-only</div>
-                      <div className="text-sm text-slate-600">Focus (if needed)</div>
+                      <div className="text-base font-bold text-slate-900">{t.comparison.nlOnly}</div>
+                      <div className="text-sm text-slate-600">{t.comparison.focusNeeded}</div>
                     </td>
                   </tr>
                 </tbody>
@@ -2610,9 +2905,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <span className="text-white text-xl font-bold">1</span>
                 </div>
                 <div className="flex-1">
-                  <h3 className="text-2xl font-bold text-white mb-3">Pension Sufficiency Audit</h3>
+                  <h3 className="text-2xl font-bold text-white mb-3">{t.comparison.pensionAudit}</h3>
                   <p className="text-slate-300 leading-relaxed mb-4">
-                    The AI will analyze if your current built-up capital and state benefits provide a sustainable lifestyle.
+                    {t.comparison.pensionAuditDesc}
                   </p>
                   
                   <div className="space-y-4 mt-6">
@@ -2621,10 +2916,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
                         </svg>
-                        AOW Projections (2026)
+                        {t.comparison.aowProjections}
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        For a single person, the net state pension is approximately <strong className="text-white">€1,558.15 per month</strong>; for couples, it is <strong className="text-white">€1,067.70 per person</strong>.
+                        {t.comparison.aowDesc}
                       </p>
                     </div>
 
@@ -2633,10 +2928,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                         </svg>
-                        The "Gap" Analysis
+                        {t.comparison.gapAnalysis}
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        The PDF compares your projected monthly expenses against your AOW and employer pension (Pillar 2). If there is a shortfall, the AI calculates exactly how much extra capital you need in your "nest egg" to bridge the gap until you reach the state pension age.
+                        {t.comparison.gapDesc}
                       </p>
                     </div>
                   </div>
@@ -2651,9 +2946,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <span className="text-white text-xl font-bold">2</span>
                 </div>
                 <div className="flex-1">
-                  <h3 className="text-2xl font-bold text-white mb-3">The "Bigger House" Tax Strategy</h3>
+                  <h3 className="text-2xl font-bold text-white mb-3">{t.comparison.biggerHouse}</h3>
                   <p className="text-slate-300 leading-relaxed mb-4">
-                    Dutch law provides unique advantages for primary residences (Box 1) over other investments (Box 3).
+                    {t.comparison.biggerHouseDesc}
                   </p>
                   
                   <div className="space-y-4 mt-6">
@@ -2662,10 +2957,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
                         </svg>
-                        Asset Shelter
+                        {t.comparison.assetShelter}
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        Money invested in a primary home is not subject to the heavy Box 3 wealth tax, which in 2024 assumes a high fictitious return of <strong className="text-white">6.04%</strong> on investments. Moving "taxable" wealth into a "tax-free" home can save you thousands annually.
+                        {t.comparison.assetShelterDesc}
                       </p>
                     </div>
 
@@ -2674,10 +2969,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
-                        Mortgage Interest Deduction (HRA)
+                        {t.comparison.mortgageHRA}
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        The PDF calculates your specific tax refund for a larger mortgage, which is currently capped at a deduction rate of <strong className="text-white">37.48%</strong>.
+                        {t.comparison.mortgageHRADesc}
                       </p>
                     </div>
 
@@ -2686,10 +2981,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                         </svg>
-                        The "Buying vs. Investing" Verdict
+                        {t.comparison.buyingVsInvesting}
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        AI models whether the HRA refund plus the Box 3 tax savings outweighs the potential 7–8% returns of the stock market.
+                        {t.comparison.buyingVsInvestingDesc}
                       </p>
                     </div>
                   </div>
@@ -2704,9 +2999,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <span className="text-white text-xl font-bold">3</span>
                 </div>
                 <div className="flex-1">
-                  <h3 className="text-2xl font-bold text-white mb-3">Additional Tax-Saving Options in the PDF</h3>
+                  <h3 className="text-2xl font-bold text-white mb-3">{t.comparison.additionalOptions}</h3>
                   <p className="text-slate-300 leading-relaxed mb-4">
-                    Include these "Pro" features to justify the advisor-level value:
+                    {t.comparison.additionalOptionsDesc}
                   </p>
                   
                   <div className="space-y-4 mt-6">
@@ -2715,10 +3010,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
                         </svg>
-                        Jaarruimte Optimization
+                        {t.comparison.jaarruimteOpt}
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        Shows exactly how to use your 2026 private pension room to get an immediate tax refund of up to <strong className="text-white">49.5%</strong> on your contributions.
+                        {t.comparison.jaarruimteDesc}
                       </p>
                     </div>
 
@@ -2727,10 +3022,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2" />
                         </svg>
-                        The "Rebuttal Scheme" (Tegenbewijsregeling)
+                        {t.comparison.rebuttalScheme}
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        If your actual investment returns in 2024 are lower than the government's assumed 6.04%, the PDF explains how to file for a tax reduction based on your real results.
+                        {t.comparison.rebuttalDesc}
                       </p>
                     </div>
 
@@ -2739,10 +3034,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15" />
                         </svg>
-                        Wealth Reallocation
+                        {t.comparison.wealthReallocation}
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        Recommends shifting "Other Assets" into "Savings" before the October 1st cut-off to benefit from lower fictitious return rates (~1.03% vs 6.04%).
+                        {t.comparison.wealthReallocationDesc}
                       </p>
                     </div>
 
@@ -2751,10 +3046,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                           <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 3v4M3 5h4M6 17v4m-2-2h4m5-16l2.286 6.857L21 12l-5.714 2.143L13 21l-2.286-6.857L5 12l5.714-2.143L13 3z" />
                         </svg>
-                        Green Investment Credit
+                        {t.comparison.greenInvestment}
                       </h4>
                       <p className="text-slate-300 text-sm leading-relaxed">
-                        Identifies if you should use the <strong className="text-white">€26,715 exemption</strong> for "Groenbeleggen" (Green Investments) before this popular tax break is phased out in 2027/2028.
+                        {t.comparison.greenInvestmentDesc}
                       </p>
                     </div>
                   </div>
@@ -2771,10 +3066,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 <div className="flex-shrink-0 w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center">
                   <span className="text-white text-lg font-bold">1</span>
                 </div>
-                <h3 className="text-2xl font-bold text-white">The 2026 Strategy: "The Choice"</h3>
+                <h3 className="text-2xl font-bold text-white">{t.comparison.strategy2026}</h3>
               </div>
               <p className="text-slate-300 leading-relaxed mb-6">
-                Currently, you are in a transition phase. You can often choose the most beneficial calculation:
+                {t.comparison.strategy2026Desc}
               </p>
               <div className="space-y-4">
                 <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
@@ -2782,10 +3077,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
-                    Counter-evidence Scheme (Tegenbewijsregeling)
+                    {t.comparison.counterEvidence}
                   </h4>
                   <p className="text-slate-300 text-sm leading-relaxed">
-                    If your actual investment returns are lower than the government's assumed rate (currently ~6%), you can provide evidence of your real gains to pay less tax.
+                    {t.comparison.counterEvidenceDesc}
                   </p>
                 </div>
                 <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
@@ -2793,10 +3088,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 10V3L4 14h7v7l9-11h-7z" />
                     </svg>
-                    Pillar 3 Pension Boost
+                    {t.comparison.pillar3Boost}
                   </h4>
                   <p className="text-slate-300 text-sm leading-relaxed">
-                    For 2026, the maximum Jaarruimte (tax-deductible pension room) is set at <strong className="text-white">€35,589</strong>. This is a "double win": you get a tax refund of up to <strong className="text-white">49.5%</strong> now and the assets are exempt from Box 3 tax forever.
+                    {t.comparison.pillar3BoostDesc}
                   </p>
                 </div>
               </div>
@@ -2808,35 +3103,35 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 <div className="flex-shrink-0 w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center">
                   <span className="text-white text-lg font-bold">2</span>
                 </div>
-                <h3 className="text-2xl font-bold text-white">The 2028 Revolution: "Actual Gains"</h3>
+                <h3 className="text-2xl font-bold text-white">{t.comparison.revolution2028}</h3>
               </div>
               <p className="text-slate-300 leading-relaxed mb-6">
-                On February 12, 2026, the Dutch Parliament approved the "Wet werkelijk rendement box 3," set to launch on January 1, 2028. This creates two new regimes:
+                {t.comparison.revolution2028Desc}
               </p>
               <div className="overflow-x-auto">
                 <table className="w-full border-collapse">
                   <thead>
                     <tr className="bg-emerald-500/20 border-b-2 border-emerald-500">
-                      <th className="text-left p-4 text-emerald-400 font-semibold">Asset Type</th>
-                      <th className="text-left p-4 text-emerald-400 font-semibold">2028 Tax Model</th>
-                      <th className="text-left p-4 text-emerald-400 font-semibold">Impact</th>
+                      <th className="text-left p-4 text-emerald-400 font-semibold">{t.comparison.assetType}</th>
+                      <th className="text-left p-4 text-emerald-400 font-semibold">{t.comparison.taxModel2028}</th>
+                      <th className="text-left p-4 text-emerald-400 font-semibold">{t.comparison.impact}</th>
                     </tr>
                   </thead>
                   <tbody>
                     <tr className="border-b border-slate-700 hover:bg-slate-800/50 transition-colors">
-                      <td className="p-4 text-white font-medium">Stocks, Crypto, Bonds</td>
-                      <td className="p-4 text-slate-300">Capital Growth Tax (Vermogensaanwas)</td>
-                      <td className="p-4 text-slate-300">You pay tax annually on unrealized gains (paper profits), even if you don't sell.</td>
+                      <td className="p-4 text-white font-medium">{t.comparison.stocksCryptoBonds}</td>
+                      <td className="p-4 text-slate-300">{t.comparison.capitalGrowthTax}</td>
+                      <td className="p-4 text-slate-300">{t.comparison.capitalGrowthImpact}</td>
                     </tr>
                     <tr className="border-b border-slate-700 hover:bg-slate-800/50 transition-colors">
-                      <td className="p-4 text-white font-medium">Real Estate & Startups</td>
-                      <td className="p-4 text-slate-300">Capital Gains Tax (Vermogenswinst)</td>
-                      <td className="p-4 text-slate-300">You only pay tax on the profit when you sell the property or shares.</td>
+                      <td className="p-4 text-white font-medium">{t.comparison.realEstateStartups}</td>
+                      <td className="p-4 text-slate-300">{t.comparison.capitalGainsTax}</td>
+                      <td className="p-4 text-slate-300">{t.comparison.capitalGainsImpact}</td>
                     </tr>
                     <tr className="hover:bg-slate-800/50 transition-colors">
-                      <td className="p-4 text-white font-medium">Bank Savings</td>
-                      <td className="p-4 text-slate-300">Actual Interest</td>
-                      <td className="p-4 text-slate-300">You pay 36% tax only on the interest you actually received.</td>
+                      <td className="p-4 text-white font-medium">{t.comparison.bankSavings}</td>
+                      <td className="p-4 text-slate-300">{t.comparison.actualInterest}</td>
+                      <td className="p-4 text-slate-300">{t.comparison.actualInterestImpact}</td>
                     </tr>
                   </tbody>
                 </table>
@@ -2849,10 +3144,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 <div className="flex-shrink-0 w-10 h-10 bg-emerald-500 rounded-lg flex items-center justify-center">
                   <span className="text-white text-lg font-bold">3</span>
                 </div>
-                <h3 className="text-2xl font-bold text-white">Critical "Life Engineering" Options for the PDF</h3>
+                <h3 className="text-2xl font-bold text-white">{t.comparison.lifeEngineering}</h3>
               </div>
               <p className="text-slate-300 leading-relaxed mb-6">
-                To protect your wealth during this shift, the PDF should analyze these advanced options:
+                {t.comparison.lifeEngineeringDesc}
               </p>
               <div className="space-y-4">
                 <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
@@ -2860,10 +3155,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
                     </svg>
-                    The "House as a Safe Haven"
+                    {t.comparison.houseSafeHaven}
                   </h4>
                   <p className="text-slate-300 text-sm leading-relaxed">
-                    Since primary residences stay in Box 1, they are shielded from the new 2028 Box 3 rules. Moving "excess" investment capital into home equity could prevent the "Capital Growth Tax" from eating your paper profits.
+                    {t.comparison.houseSafeHavenDesc}
                   </p>
                 </div>
                 <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
@@ -2871,10 +3166,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                     </svg>
-                    Strategic Loss Harvesting
+                    {t.comparison.lossHarvesting}
                   </h4>
                   <p className="text-slate-300 text-sm leading-relaxed">
-                    From 2028, losses are deductible and can be carried forward to offset future gains. The AI can model when to "lock in" a loss to lower your future tax bills.
+                    {t.comparison.lossHarvestingDesc}
                   </p>
                 </div>
                 <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
@@ -2882,10 +3177,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
                     </svg>
-                    Wealth Transfer (Gifting)
+                    {t.comparison.wealthTransfer}
                   </h4>
                   <p className="text-slate-300 text-sm leading-relaxed">
-                    In 2026, you can gift children <strong className="text-white">€6,908 annually</strong> or a one-time tax-free sum of <strong className="text-white">€33,129</strong> (if they are under 40). Doing this before 2028 reduces the total assets subject to the new "unrealized gains" tax.
+                    {t.comparison.wealthTransferDesc}
                   </p>
                 </div>
                 <div className="bg-slate-800/50 rounded-lg p-5 border border-slate-700">
@@ -2893,10 +3188,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
                     </svg>
-                    Factor A Audit
+                    {t.comparison.factorAAudit}
                   </h4>
                   <p className="text-slate-300 text-sm leading-relaxed">
-                    The PDF will check your Factor A (employer pension growth) to see if you have "Reserveringsruimte"—unused tax-deductible room from the last 10 years (up to <strong className="text-white">€42,753 in 2026</strong>).
+                    {t.comparison.factorAAuditDesc}
                   </p>
                 </div>
               </div>
@@ -2906,10 +3201,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
           {/* CTA Section */}
           <div className="bg-gradient-to-r from-emerald-600 to-teal-600 rounded-2xl p-8 text-center">
             <h2 className="text-2xl sm:text-3xl font-bold text-white mb-4">
-              Ready to Get Your Full Strategy?
+              {t.comparison.readyFullStrategy}
             </h2>
             <p className="text-emerald-50 mb-6 text-lg">
-              Download your personalized PDF roadmap with detailed action steps
+              {t.comparison.downloadRoadmap}
             </p>
             <div className="flex flex-col sm:flex-row gap-4 justify-center items-center">
               <button 
@@ -2922,7 +3217,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 onClick={() => setShowComparison(false)}
                 className="text-white hover:text-emerald-100 underline font-medium"
               >
-                Maybe later
+                {t.comparison.maybeLater}
               </button>
             </div>
           </div>
@@ -2937,7 +3232,30 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
   if (showResults) {
     return (
       <>
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+      <div className={pageBg}>
+        {/* Top bar */}
+        <div className="sticky top-0 z-30 bg-slate-950/80 backdrop-blur-md border-b border-slate-800">
+          <div className="max-w-6xl mx-auto px-4 sm:px-6 py-3 flex items-center justify-between">
+            <button
+              onClick={() => { setShowResults(false); setShowQuestionnaire(true); }}
+              className="flex items-center gap-2 text-slate-400 hover:text-white transition-colors"
+            >
+              <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" /></svg>
+              <span className="text-sm font-medium">{t.household.back}</span>
+            </button>
+            <div className="flex items-center gap-3">
+              <span className="text-sm text-slate-500 font-medium tracking-wider uppercase">VrijWealth</span>
+              <button onClick={toggleDarkMode} className="text-slate-400 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-slate-800" title={darkMode ? 'Light mode' : 'Dark mode'}>
+                {darkMode ? (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+
         {/* Main Content */}
         <div className="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-8 sm:py-12">
           {/* Special Offer Banner */}
@@ -2953,10 +3271,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     <svg className="w-4 h-4" fill="currentColor" viewBox="0 0 20 20">
                       <path fillRule="evenodd" d="M12.395 2.553a1 1 0 00-1.45-.385c-.345.23-.614.558-.822.88-.214.33-.403.713-.57 1.116-.334.804-.614 1.768-.84 2.734a31.365 31.365 0 00-.613 3.58 2.64 2.64 0 01-.945-1.067c-.328-.68-.398-1.534-.398-2.654A1 1 0 005.05 6.05 6.981 6.981 0 003 11a7 7 0 1011.95-4.95c-.592-.591-.98-.985-1.348-1.467-.363-.476-.724-1.063-1.207-2.03zM12.12 15.12A3 3 0 017 13s.879.5 2.5.5c0-1 .5-4 1.25-4.5.5 1 .786 1.293 1.371 1.879A2.99 2.99 0 0113 13a2.99 2.99 0 01-.879 2.121z" clipRule="evenodd" />
                     </svg>
-                    <span>LIMITED TIME OFFER</span>
+                    <span>{t.results.limitedTimeOffer}</span>
                   </div>
                   <h2 className="text-xl sm:text-2xl font-bold text-white mb-2">
-                    2026 Strategy Launch Offer
+                    {t.results.launchOffer}
                   </h2>
                   <p className="text-emerald-50 text-sm sm:text-base">
                     Get your full PDF Roadmap for <span className="font-bold text-white text-lg">€19.99</span> <span className="line-through opacity-75">(Normally €99)</span>
@@ -2970,7 +3288,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     onClick={handlePurchasePDF}
                     className="bg-white hover:bg-emerald-50 text-emerald-600 font-bold px-6 sm:px-8 py-3 sm:py-4 rounded-xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105 text-sm sm:text-base"
                   >
-                    Get Full PDF Roadmap →
+                    {t.results.getFullPdf}
                   </button>
                 </div>
               </div>
@@ -2989,10 +3307,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
           {/* Title */}
           <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white text-center mb-4">
-            Plan Your Path to FIRE
+            {t.results.planPath}
           </h1>
           <p className="text-slate-400 text-center text-base sm:text-lg mb-8 sm:mb-12 max-w-3xl mx-auto">
-            Tailored for the Netherlands. Smart strategies considering Dutch tax rules, pension pillars, and wealth-building opportunities.
+            {language === 'nl' ? 'Op maat gemaakt voor Nederland. Slimme strategieën die rekening houden met Nederlandse belastingregels, pensioenpijlers en vermogensopbouwmogelijkheden.' : 'Tailored for the Netherlands. Smart strategies considering Dutch tax rules, pension pillars, and wealth-building opportunities.'}
           </p>
 
           {/* Metrics Cards */}
@@ -3000,7 +3318,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             {/* Monthly Need (Future) */}
             <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg">
               <div className="flex items-start justify-between mb-3">
-                <div className="text-slate-600 text-sm font-medium">Monthly Need (Future)</div>
+                <div className="text-slate-600 text-sm font-medium">{t.results.monthlyNeed}</div>
                 <div className="w-10 h-10 sm:w-12 sm:h-12 bg-blue-500 rounded-xl flex items-center justify-center">
                   <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -3015,7 +3333,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             {/* Target Nest Egg */}
             <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg">
               <div className="flex items-start justify-between mb-3">
-                <div className="text-slate-600 text-sm font-medium">Target Nest Egg</div>
+                <div className="text-slate-600 text-sm font-medium">{t.results.targetNestEgg}</div>
                 <div className="w-10 h-10 sm:w-12 sm:h-12 bg-emerald-500 rounded-xl flex items-center justify-center">
                   <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 8h6m-5 0a3 3 0 110 6H9l3 3m-3-6h6m6 1a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -3030,7 +3348,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             {/* Gap to Fill */}
             <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg">
               <div className="flex items-start justify-between mb-3">
-                <div className="text-slate-600 text-sm font-medium">Gap to Fill</div>
+                <div className="text-slate-600 text-sm font-medium">{t.results.gapToFill}</div>
                 <div className="w-10 h-10 sm:w-12 sm:h-12 bg-orange-500 rounded-xl flex items-center justify-center">
                   <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
@@ -3045,7 +3363,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             {/* Monthly Savings Target */}
             <div className="bg-white rounded-2xl p-5 sm:p-6 shadow-lg">
               <div className="flex items-start justify-between mb-3">
-                <div className="text-slate-600 text-sm font-medium">Monthly Savings Target</div>
+                <div className="text-slate-600 text-sm font-medium">{t.results.monthlySavings}</div>
                 <div className="w-10 h-10 sm:w-12 sm:h-12 bg-purple-500 rounded-xl flex items-center justify-center">
                   <svg className="w-5 h-5 sm:w-6 sm:h-6 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
@@ -3067,7 +3385,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
               </svg>
-              Adjust Parameters
+              {t.results.adjustParams}
             </button>
           </div>
 
@@ -3077,27 +3395,27 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               <svg className="w-5 h-5 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2m-6 9l2 2 4-4" />
               </svg>
-              <h3 className="text-white font-bold text-sm sm:text-base tracking-wider uppercase">Data Audit <span className="text-slate-400 font-normal normal-case tracking-normal">(Based on Your Inputs)</span></h3>
+              <h3 className="text-white font-bold text-sm sm:text-base tracking-wider uppercase">{t.results.dataAudit} <span className="text-slate-400 font-normal normal-case tracking-normal">({t.results.reportingDate})</span></h3>
             </div>
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-8 gap-y-2">
               <div className="flex items-center justify-between py-2 border-b border-slate-700/40">
-                <span className="text-slate-400 text-sm">Reporting Date</span>
-                <span className="text-white text-sm font-medium">{new Date().toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
+                <span className="text-slate-400 text-sm">{t.results.reportingDate}</span>
+                <span className="text-white text-sm font-medium">{new Date().toLocaleDateString(language === 'nl' ? 'nl-NL' : 'en-GB', { day: 'numeric', month: 'long', year: 'numeric' })}</span>
               </div>
               <div className="flex items-center justify-between py-2 border-b border-slate-700/40">
-                <span className="text-slate-400 text-sm">Residency</span>
-                <span className="text-white text-sm font-medium">Arrived in NL at Age {formData.arrivalAgeNL || (parseInt(formData.age) - (50 - (formData.yearsAbroad || 0)))}</span>
+                <span className="text-slate-400 text-sm">{t.results.residency}</span>
+                <span className="text-white text-sm font-medium">{language === 'nl' ? 'Aangekomen in NL op leeftijd' : 'Arrived in NL at Age'} {formData.arrivalAgeNL || (parseInt(formData.age) - (50 - (formData.yearsAbroad || 0)))}</span>
               </div>
               <div className="flex items-center justify-between py-2 border-b border-slate-700/40">
-                <span className="text-slate-400 text-sm">Current Assets</span>
+                <span className="text-slate-400 text-sm">{t.results.currentAssets}</span>
                 <span className="text-white text-sm font-medium">€{((formData.savingsBalance || 0) + (formData.cryptoValueDec31 || 0) + (formData.propertyValue || 0)).toLocaleString()}</span>
               </div>
               <div className="flex items-center justify-between py-2 border-b border-slate-700/40">
-                <span className="text-slate-400 text-sm">Primary Residence</span>
+                <span className="text-slate-400 text-sm">{t.results.primaryResidence}</span>
                 <span className="text-white text-sm font-medium">€{(formData.propertyValue || 0).toLocaleString()} (WOZ)</span>
               </div>
               <div className="flex items-center justify-between py-2 border-b border-slate-700/40 sm:border-b-0">
-                <span className="text-slate-400 text-sm">Retirement Goal</span>
+                <span className="text-slate-400 text-sm">{t.results.retirementGoal}</span>
                 <span className="text-white text-sm font-medium">€{(formData.desiredMonthlyIncome || 0).toLocaleString()}/mo at Age {formData.targetRetirementAge || formData.retirementAge}</span>
               </div>
             </div>
@@ -3110,7 +3428,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
           <div className="bg-slate-800 rounded-2xl p-6 sm:p-8 mb-8 sm:mb-12 border border-slate-700">
             <div className="flex items-start gap-3 mb-6">
               <span className="text-2xl">💡</span>
-              <h2 className="text-white text-xl sm:text-2xl font-bold">Your Personalized Strategy</h2>
+              <h2 className="text-white text-xl sm:text-2xl font-bold">{t.results.personalizedStrategy}</h2>
             </div>
             <p className="text-slate-400 text-sm mb-6 italic border-l-2 border-emerald-500/40 pl-4">
               This personalized strategy was engineered by the VrijWealth AI engine based on the unique financial profile and goals you provided. It is designed to provide high-level tax-optimization pathways and a structural roadmap for 2026-2028.
@@ -3225,7 +3543,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 <svg className="w-5 h-5 text-blue-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
                 </svg>
-                <h3 className="text-slate-900 text-lg sm:text-xl font-bold">Wealth Projection</h3>
+                <h3 className="text-slate-900 text-lg sm:text-xl font-bold">{t.results.wealthProjection}</h3>
               </div>
               
               {/* Simple Line Chart */}
@@ -3250,14 +3568,14 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <text x="35" y="255" fontSize="10" fill="#64748b" textAnchor="end">€0</text>
                   
                   {/* X-axis labels */}
-                  <text x="50" y="270" fontSize="10" fill="#64748b" textAnchor="middle">Year 0</text>
-                  <text x="150" y="270" fontSize="10" fill="#64748b" textAnchor="middle">Year 5</text>
-                  <text x="250" y="270" fontSize="10" fill="#64748b" textAnchor="middle">Year 10</text>
-                  <text x="350" y="270" fontSize="10" fill="#64748b" textAnchor="middle">Year 15</text>
-                  <text x="450" y="270" fontSize="10" fill="#64748b" textAnchor="middle">Year {formData.retirementAge - formData.age}</text>
+                  <text x="50" y="270" fontSize="10" fill="#64748b" textAnchor="middle">{language === 'nl' ? 'Jaar' : 'Year'} 0</text>
+                  <text x="150" y="270" fontSize="10" fill="#64748b" textAnchor="middle">{language === 'nl' ? 'Jaar' : 'Year'} 5</text>
+                  <text x="250" y="270" fontSize="10" fill="#64748b" textAnchor="middle">{language === 'nl' ? 'Jaar' : 'Year'} 10</text>
+                  <text x="350" y="270" fontSize="10" fill="#64748b" textAnchor="middle">{language === 'nl' ? 'Jaar' : 'Year'} 15</text>
+                  <text x="450" y="270" fontSize="10" fill="#64748b" textAnchor="middle">{language === 'nl' ? 'Jaar' : 'Year'} {formData.retirementAge - formData.age}</text>
                   
                   {/* X-axis label */}
-                  <text x="250" y="290" fontSize="12" fill="#64748b" textAnchor="middle" fontWeight="500">Years</text>
+                  <text x="250" y="290" fontSize="12" fill="#64748b" textAnchor="middle" fontWeight="500">{language === 'nl' ? 'Jaren' : 'Years'}</text>
                   
                   {/* Growth curve */}
                   {(() => {
@@ -3294,22 +3612,22 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   
                   {/* Target line */}
                   <line x1="50" y1={Math.max(50, 250 - (wealthProjection.targetNestEgg / Math.max(wealthProjection.targetNestEgg, wealthProjection.projectedAtRetirement) * 200))} x2="450" y2={Math.max(50, 250 - (wealthProjection.targetNestEgg / Math.max(wealthProjection.targetNestEgg, wealthProjection.projectedAtRetirement) * 200))} stroke="#10b981" strokeWidth="2" strokeDasharray="5,5"/>
-                  <text x="455" y={Math.max(55, 255 - (wealthProjection.targetNestEgg / Math.max(wealthProjection.targetNestEgg, wealthProjection.projectedAtRetirement) * 200))} fontSize="11" fill="#10b981" fontWeight="bold">Target: €{(wealthProjection.targetNestEgg / 1000000).toFixed(2)}M</text>
+                  <text x="455" y={Math.max(55, 255 - (wealthProjection.targetNestEgg / Math.max(wealthProjection.targetNestEgg, wealthProjection.projectedAtRetirement) * 200))} fontSize="11" fill="#10b981" fontWeight="bold">{language === 'nl' ? 'Doel' : 'Target'}: €{(wealthProjection.targetNestEgg / 1000000).toFixed(2)}M</text>
                 </svg>
               </div>
               
               {/* Wealth Stats */}
               <div className="grid grid-cols-3 gap-3">
                 <div className="bg-blue-50 rounded-lg p-3">
-                  <div className="text-xs text-slate-600 mb-1">Current Wealth</div>
+                  <div className="text-xs text-slate-600 mb-1">{t.results.currentWealth}</div>
                   <div className="text-lg font-bold text-slate-900">€{(wealthProjection.currentWealth / 1000).toFixed(0)}k</div>
                 </div>
                 <div className="bg-slate-50 rounded-lg p-3">
-                  <div className="text-xs text-slate-600 mb-1">Projected at Retirement</div>
+                  <div className="text-xs text-slate-600 mb-1">{t.results.projectedRetirement}</div>
                   <div className="text-lg font-bold text-slate-900">€{(wealthProjection.projectedAtRetirement / 1000000).toFixed(2)}M</div>
                 </div>
                 <div className="bg-emerald-50 rounded-lg p-3">
-                  <div className="text-xs text-slate-600 mb-1">Target Nest Egg</div>
+                  <div className="text-xs text-slate-600 mb-1">{t.results.targetNestEgg}</div>
                   <div className="text-lg font-bold text-emerald-600">€{(wealthProjection.targetNestEgg / 1000000).toFixed(2)}M</div>
                 </div>
               </div>
@@ -3317,13 +3635,13 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
             {/* Recommended Allocation */}
             <div className="bg-white rounded-2xl p-6 sm:p-8 shadow-lg">
-              <h3 className="text-slate-900 text-lg sm:text-xl font-bold mb-6">Recommended Allocation</h3>
+              <h3 className="text-slate-900 text-lg sm:text-xl font-bold mb-6">{t.results.recommendedAllocation}</h3>
               
               <div className="space-y-5">
                 {/* Stocks & ETFs */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-slate-700 font-medium text-sm">Stocks & ETFs</span>
+                    <span className="text-slate-700 font-medium text-sm">{t.results.stocksETFs}</span>
                     <span className="text-slate-900 font-bold">{allocation.stocks}%</span>
                   </div>
                   <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
@@ -3337,7 +3655,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 {/* Bonds */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-slate-700 font-medium text-sm">Bonds</span>
+                    <span className="text-slate-700 font-medium text-sm">{t.results.bonds}</span>
                     <span className="text-slate-900 font-bold">{allocation.bonds}%</span>
                   </div>
                   <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
@@ -3351,7 +3669,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 {/* Real Estate */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-slate-700 font-medium text-sm">Real Estate</span>
+                    <span className="text-slate-700 font-medium text-sm">{t.results.realEstateLabel}</span>
                     <span className="text-slate-900 font-bold">{allocation.realEstate}%</span>
                   </div>
                   <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
@@ -3365,7 +3683,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 {/* Cash Reserve */}
                 <div>
                   <div className="flex items-center justify-between mb-2">
-                    <span className="text-slate-700 font-medium text-sm">Cash Reserve</span>
+                    <span className="text-slate-700 font-medium text-sm">{t.results.cashReserve}</span>
                     <span className="text-slate-900 font-bold">{allocation.cash}%</span>
                   </div>
                   <div className="w-full bg-slate-200 rounded-full h-3 overflow-hidden">
@@ -3380,7 +3698,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               {/* Allocation Rationale */}
               {allocation.stocks > 0 && (
                 <div className="mt-6 p-4 bg-slate-50 rounded-lg">
-                  <h4 className="text-slate-900 font-semibold text-sm mb-2">Allocation Rationale:</h4>
+                  <h4 className="text-slate-900 font-semibold text-sm mb-2">{t.results.allocationRationale}:</h4>
                   <p className="text-slate-600 text-xs leading-relaxed">
                     Given your age ({formData.age}) and {(formData.targetRetirementAge || 65) - (parseInt(formData.age) || 30)}-year investment horizon, 
                     a {allocation.stocks}% allocation to stocks maximizes compounding growth. 
@@ -3396,7 +3714,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
           {/* Key Action Steps */}
           {actionSteps.length > 0 && (
             <div className="mb-8 sm:mb-12">
-              <h2 className="text-white text-2xl sm:text-3xl font-bold mb-6">Key Action Steps</h2>
+              <h2 className="text-white text-2xl sm:text-3xl font-bold mb-6">{t.results.keyActions}</h2>
               
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
                 {actionSteps.map((step, index) => (
@@ -3427,7 +3745,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               <svg className="w-8 h-8 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
               </svg>
-              <h2 className="text-white text-2xl sm:text-3xl font-bold">Recommendations</h2>
+              <h2 className="text-white text-2xl sm:text-3xl font-bold">{t.results.recommendations}</h2>
             </div>
             
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4 sm:gap-6">
@@ -3439,7 +3757,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
                     </svg>
                   </div>
-                  <h3 className="text-slate-900 font-bold text-base">Box 3 Tax Shield</h3>
+                  <h3 className="text-slate-900 font-bold text-base">{t.results.box3TaxShield}</h3>
                 </div>
                 <p className="text-slate-600 text-sm leading-relaxed mb-3">
                   Move savings into Lijfrente (Pillar 3) to reduce Box 3 taxable wealth. 
@@ -3461,22 +3779,22 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                     </svg>
                   </div>
-                  <h3 className="text-slate-900 font-bold text-base">Bridge Phase Plan</h3>
+                  <h3 className="text-slate-900 font-bold text-base">{t.results.bridgePhasePlan}</h3>
                 </div>
                 <p className="text-slate-600 text-sm leading-relaxed mb-3">
                   {(() => {
                     const bridgeYrs = Math.max(0, Math.round((67.25 - (formData.targetRetirementAge || 65)) * 10) / 10);
                     const bridgeCost = Math.round(bridgeYrs * 12 * (formData.desiredMonthlyIncome || 3000));
                     return bridgeYrs > 0 
-                      ? <>Fund <span className="font-semibold text-blue-700">€{bridgeCost.toLocaleString()}</span> for {Math.round(bridgeYrs)} bridge years (age {formData.targetRetirementAge}→67) before AOW kicks in. Use index funds + dividend ETFs for steady drawdown.</>
-                      : <>Your retirement age aligns with AOW. Focus on maximizing pension pot and reducing Box 3 exposure before retirement.</>;
+                      ? <>{language === 'nl' ? 'Financier' : 'Fund'} <span className="font-semibold text-blue-700">€{bridgeCost.toLocaleString()}</span> {language === 'nl' ? `voor ${Math.round(bridgeYrs)} brugjaren (leeftijd ${formData.targetRetirementAge}→67) voordat AOW ingaat. Gebruik indexfondsen + dividend-ETF's voor geleidelijke opname.` : `for ${Math.round(bridgeYrs)} bridge years (age ${formData.targetRetirementAge}→67) before AOW kicks in. Use index funds + dividend ETFs for steady drawdown.`}</>
+                      : <>{language === 'nl' ? 'Je pensioenleeftijd sluit aan bij de AOW. Focus op het maximaliseren van je pensioenpot en het verminderen van Box 3-blootstelling vóór pensionering.' : 'Your retirement age aligns with AOW. Focus on maximizing pension pot and reducing Box 3 exposure before retirement.'}</>;
                   })()}
                 </p>
                 <div className="flex items-center gap-2 text-xs text-blue-600 font-medium">
                   <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
                   </svg>
-                  Self-funded early retirement buffer
+                  {language === 'nl' ? 'Zelf-gefinancierde vervroegde pensioenbuffer' : 'Self-funded early retirement buffer'}
                 </div>
               </div>
 
@@ -3488,7 +3806,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                       <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-2.5L13.732 4c-.77-.833-1.964-.833-2.732 0L4.082 16.5c-.77.833.192 2.5 1.732 2.5z" />
                     </svg>
                   </div>
-                  <h3 className="text-slate-900 font-bold text-base">2028 Tax Shift</h3>
+                  <h3 className="text-slate-900 font-bold text-base">{t.results.taxShift2028}</h3>
                 </div>
                 <p className="text-slate-600 text-sm leading-relaxed mb-3">
                   From 2028, Box 3 switches to actual returns (36% on real gains). 
@@ -3515,14 +3833,14 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <svg className="w-8 h-8 text-emerald-600 flex-shrink-0 mt-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
                   </svg>
-                  <h2 className="text-slate-900 text-xl sm:text-2xl font-bold">Dutch Tax Optimization</h2>
+                  <h2 className="text-slate-900 text-xl sm:text-2xl font-bold">{t.results.dutchTaxOpt}</h2>
                 </div>
                 
                 <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                   {/* Box 3 Strategy */}
                   {dutchTaxOptimization.box3Strategy && (
                     <div>
-                      <h3 className="text-slate-900 font-bold text-base mb-3">Box 3 Strategy</h3>
+                      <h3 className="text-slate-900 font-bold text-base mb-3">{t.results.box3Strategy}</h3>
                       <p className="text-slate-700 text-sm leading-relaxed">
                         {dutchTaxOptimization.box3Strategy}
                       </p>
@@ -3532,7 +3850,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   {/* Pension Recommendations */}
                   {dutchTaxOptimization.pensionRecommendations && (
                     <div>
-                      <h3 className="text-slate-900 font-bold text-base mb-3">Pension Recommendations</h3>
+                      <h3 className="text-slate-900 font-bold text-base mb-3">{t.results.pensionRecommendations}</h3>
                       <p className="text-slate-700 text-sm leading-relaxed">
                         {dutchTaxOptimization.pensionRecommendations}
                       </p>
@@ -3561,7 +3879,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 <svg className="w-8 h-8 text-emerald-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                 </svg>
-                <h2 className="text-white text-2xl sm:text-3xl font-bold">Recommended Dutch Products</h2>
+                <h2 className="text-white text-2xl sm:text-3xl font-bold">{t.results.dutchProducts}</h2>
               </div>
               
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
@@ -3586,7 +3904,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               <svg className="w-8 h-8 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
               </svg>
-              <h2 className="text-white text-2xl sm:text-3xl font-bold">Your Wealth Journey</h2>
+              <h2 className="text-white text-2xl sm:text-3xl font-bold">{t.results.wealthJourney}</h2>
             </div>
 
             <div className="bg-white rounded-2xl p-6 sm:p-8 shadow-lg">
@@ -3661,7 +3979,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
                         {/* Content */}
                         <div className="flex-1 pb-8">
-                          <h3 className="text-slate-900 text-xl font-bold mb-1">Year {year}</h3>
+                          <h3 className="text-slate-900 text-xl font-bold mb-1">{language === 'nl' ? 'Jaar' : 'Year'} {year}</h3>
                           <div className="text-emerald-600 text-2xl font-bold mb-3">
                             €{wealth.toLocaleString()}
                           </div>
@@ -3678,7 +3996,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               {/* Footer */}
               <div className="mt-8 pt-6 border-t border-slate-200">
                 <p className="text-slate-500 text-center text-sm">
-                  Designed for the Netherlands • Considers Dutch tax regulations & pension pillars
+                  {t.results.designedForNL}
                 </p>
               </div>
             </div>
@@ -3696,7 +4014,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
               </svg>
-              Back to Home
+              {t.results.backToHome}
             </button>
           </div>
         </div>
@@ -3709,10 +4027,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
   // Questionnaire UI
   if (showQuestionnaire) {
     return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950 relative">
+      <div className={`${pageBg} relative`}>
         {/* Loading Overlay */}
         {isSubmitting && (
-          <div className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+          <div className="fixed inset-0 bg-slate-950/80 backdrop-blur-sm z-50 flex items-center justify-center p-4">
             <div className="bg-slate-800 border border-slate-700 rounded-2xl p-6 sm:p-8 max-w-md w-full text-center">
               <div className="flex justify-center mb-4">
                 <svg className="animate-spin h-10 w-10 sm:h-12 sm:w-12 text-emerald-500" fill="none" viewBox="0 0 24 24">
@@ -3720,10 +4038,16 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                 </svg>
               </div>
-              <h3 className="text-xl sm:text-2xl font-bold text-white mb-2">Analyzing Your Financial Future</h3>
+              <h3 className="text-xl sm:text-2xl font-bold text-white mb-2">
+                {basicRetryCount > 0 
+                  ? `Retrying Analysis... (Attempt ${basicRetryCount + 1}/3)` 
+                  : 'Analyzing Your Financial Future'}
+              </h3>
               <div className="min-h-[4rem] flex items-center justify-center px-2">
                 <p className="text-slate-400 text-base sm:text-lg transition-opacity duration-500">
-                  {loadingMessages[loadingMessageIndex]}
+                  {basicRetryCount > 0 
+                    ? 'The AI is working hard to deliver a complete analysis. Hang tight...'
+                    : loadingMessages[loadingMessageIndex]}
                 </p>
               </div>
               <div className="mt-6 flex items-center justify-center gap-2">
@@ -3738,11 +4062,20 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
         <div className="flex min-h-screen md:h-screen">
           {/* Sidebar - Hidden on mobile */}
           <div className="hidden md:flex md:w-64 bg-slate-900/60 border-r border-slate-800 p-6 flex-col">
-            <div className="flex items-center gap-2 mb-12">
-              <svg className="w-6 h-6 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M3 17l6-6 4 4 8-8M21 7v6h-6" strokeLinecap="round" strokeLinejoin="round"/>
-              </svg>
-              <span className="text-lg font-bold text-white">ProsperPath</span>
+            <div className="flex items-center justify-between mb-8">
+              <div className="flex items-center gap-2">
+                <svg className="w-6 h-6 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                  <path d="M3 17l6-6 4 4 8-8M21 7v6h-6" strokeLinecap="round" strokeLinejoin="round"/>
+                </svg>
+                <span className="text-lg font-bold text-white">VrijWealth</span>
+              </div>
+              <button onClick={toggleDarkMode} className="text-slate-400 hover:text-white transition-colors p-1.5 rounded-lg hover:bg-slate-800" title={darkMode ? 'Light mode' : 'Dark mode'}>
+                {darkMode ? (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+                ) : (
+                  <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>
+                )}
+              </button>
             </div>
 
             <nav className="space-y-2">
@@ -3755,7 +4088,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
                 </svg>
-                <span className="font-medium">Household</span>
+                <span className="font-medium">{t.sidebar.household}</span>
               </button>
 
               <button
@@ -3767,7 +4100,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8c-1.657 0-3 .895-3 2s1.343 2 3 2 3 .895 3 2-1.343 2-3 2m0-8c1.11 0 2.08.402 2.599 1M12 8V7m0 1v8m0 0v1m0-1c-1.11 0-2.08-.402-2.599-1M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-                <span className="font-medium">Financials</span>
+                <span className="font-medium">{t.sidebar.financials}</span>
               </button>
 
               <button
@@ -3779,7 +4112,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4" />
                 </svg>
-                <span className="font-medium">Pension</span>
+                <span className="font-medium">{t.sidebar.pension}</span>
               </button>
 
               <button
@@ -3791,7 +4124,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
                 </svg>
-                <span className="font-medium">Real Estate</span>
+                <span className="font-medium">{t.sidebar.realEstate}</span>
               </button>
 
               <button
@@ -3803,7 +4136,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />
                 </svg>
-                <span className="font-medium">Retirement</span>
+                <span className="font-medium">{t.sidebar.retirement}</span>
               </button>
             </nav>
           </div>
@@ -3817,42 +4150,51 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   <svg className="w-6 h-6 text-emerald-500" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
                     <path d="M3 17l6-6 4 4 8-8M21 7v6h-6" strokeLinecap="round" strokeLinejoin="round"/>
                   </svg>
-                  <span className="text-white font-bold">ProsperPath</span>
+                  <span className="text-white font-bold">VrijWealth</span>
                 </div>
-                <div className="flex gap-1">
+                <div className="flex items-center gap-3">
+                  <button onClick={toggleDarkMode} className="text-slate-400 hover:text-white transition-colors p-1.5 rounded-lg" title={darkMode ? 'Light mode' : 'Dark mode'}>
+                    {darkMode ? (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" /></svg>
+                    ) : (
+                      <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" /></svg>
+                    )}
+                  </button>
+                  <div className="flex gap-1">
                   <div className={`w-2 h-2 rounded-full ${currentStep === 'household' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
                   <div className={`w-2 h-2 rounded-full ${currentStep === 'financials' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
                   <div className={`w-2 h-2 rounded-full ${currentStep === 'pension' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
                   <div className={`w-2 h-2 rounded-full ${currentStep === 'realEstate' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
                   <div className={`w-2 h-2 rounded-full ${currentStep === 'retirement' ? 'bg-emerald-500' : 'bg-slate-700'}`}></div>
+                  </div>
                 </div>
               </div>
               {/* Household Step */}
               {currentStep === 'household' && (
                 <div>
-                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Tell us about your household</h1>
-                  <p className="text-slate-400 mb-8 sm:mb-12">We'll personalize your wealth plan based on your situation.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">{t.household.title}</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">{t.household.subtitle}</p>
 
                   <div className="space-y-6">
                     <div>
-                      <label className="block text-white font-medium mb-2">Country of Residence</label>
+                      <label className="block text-white font-medium mb-2">{t.household.country}</label>
                       <select
                         value={formData.country}
                         onChange={(e) => updateFormData('country', e.target.value)}
                         autoComplete="off"
                         className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                       >
-                        <option value="Netherlands">🇳🇱 Netherlands</option>
+                        <option value="Netherlands">{t.household.netherlands}</option>
                       </select>
                     </div>
 
                     <div>
-                      <label className="block text-white font-medium mb-2">Full Name</label>
+                      <label className="block text-white font-medium mb-2">{t.household.fullName}</label>
                       <input
                         type="text"
                         value={formData.fullName}
                         onChange={(e) => updateFormData('fullName', e.target.value)}
-                        placeholder="Your name"
+                        placeholder={t.household.namePlaceholder}
                         autoComplete="off"
                         className={`w-full bg-slate-800 border ${validationErrors.fullName ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                       />
@@ -3862,7 +4204,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     </div>
 
                     <div>
-                      <label className="block text-white font-medium mb-2">Age</label>
+                      <label className="block text-white font-medium mb-2">{t.household.age}</label>
                       <input
                         type="number" onFocus={handleInputFocus}
                         value={formData.age}
@@ -3876,7 +4218,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     </div>
 
                     <div>
-                      <label className="block text-white font-medium mb-2">Target Retirement Age</label>
+                      <label className="block text-white font-medium mb-2">{t.household.targetRetirement}</label>
                       <input
                         type="number" onFocus={handleInputFocus}
                         value={formData.retirementAge}
@@ -3890,7 +4232,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     </div>
 
                     <div className="flex items-center justify-between py-4 border-t border-b border-slate-700">
-                      <span className="text-white font-medium">Add Spouse</span>
+                      <span className="text-white font-medium">{t.household.addSpouse}</span>
                       <button
                         onClick={() => updateFormData('hasSpouse', !formData.hasSpouse)}
                         className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
@@ -3906,7 +4248,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     </div>
 
                     <div className="flex items-center justify-between py-4 border-b border-slate-700">
-                      <span className="text-white font-medium">Have Children</span>
+                      <span className="text-white font-medium">{t.household.haveChildren}</span>
                       <button
                         onClick={() => updateFormData('hasChildren', !formData.hasChildren)}
                         className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
@@ -3923,7 +4265,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
                     {formData.hasChildren && (
                       <div>
-                        <label className="block text-white font-medium mb-2">Number of Children</label>
+                        <label className="block text-white font-medium mb-2">{t.household.numberOfChildren}</label>
                         <input
                           type="number" onFocus={handleInputFocus}
                           value={formData.childrenCount}
@@ -3945,13 +4287,13 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                       <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
                       </svg>
-                      Home
+                      {t.household.home}
                     </button>
                     <button
                       onClick={handleContinue}
                       className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 sm:px-6 py-2 sm:py-3 rounded-lg font-semibold transition-all text-sm sm:text-base"
                     >
-                      Continue
+                      {t.household.continue}
                       <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                       </svg>
@@ -3963,18 +4305,18 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               {/* Financials Step */}
               {currentStep === 'financials' && (
                 <div>
-                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Financial Details</h1>
-                  <p className="text-slate-400 mb-8 sm:mb-12">Break down your income and assets by category.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">{t.financials.title}</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">{t.financials.subtitle}</p>
 
                   <div className="space-y-8">
                     {/* Income */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">💼</span> Income
+                        <span className="text-lg">💼</span> {t.financials.income}
                       </h3>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">{formData.hasSpouse ? 'Your Annual Gross Salary (Box 1)' : 'Annual Gross Salary (Box 1)'}</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{formData.hasSpouse ? t.financials.grossSalary : t.financials.grossSalary}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -3991,7 +4333,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
                         {formData.hasSpouse && (
                           <div>
-                            <label className="block text-white font-medium mb-2 text-sm">Spouse Annual Gross Salary (Box 1)</label>
+                            <label className="block text-white font-medium mb-2 text-sm">{t.financials.spouseGrossSalary}</label>
                             <div className="relative">
                               <span className="absolute left-4 top-3 text-slate-400">€</span>
                               <input
@@ -4006,8 +4348,8 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
                         <div className="flex items-center justify-between">
                           <div>
-                            <span className="text-white font-medium block text-sm">30% Ruling Status</span>
-                            <span className="text-slate-400 text-xs">Tax-advantaged expat status</span>
+                            <span className="text-white font-medium block text-sm">{t.financials.thirtyPercent}</span>
+                            <span className="text-slate-400 text-xs">{t.financials.thirtyPercentDesc}</span>
                           </div>
                           <button
                             onClick={() => updateFormData('has30PercentRuling', !formData.has30PercentRuling)}
@@ -4028,11 +4370,11 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {/* Bank & Savings */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">🏦</span> Bank & Savings
+                        <span className="text-lg">🏦</span> {t.financials.bankSavings}
                       </h3>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Savings Balance</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.financials.savingsBalance}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4044,7 +4386,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           </div>
                         </div>
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Interest Earned (Annual)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.financials.interestEarned}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4061,11 +4403,11 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {/* Stocks & Crypto */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">📈</span> Stocks & Crypto
+                        <span className="text-lg">📈</span> {t.financials.stocksCrypto}
                       </h3>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Value on Jan 1</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.financials.valueJan1}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4077,7 +4419,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           </div>
                         </div>
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Value on Dec 31</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.financials.valueDec31}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4089,7 +4431,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           </div>
                         </div>
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Dividends Received (Annual)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.financials.dividends}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4106,11 +4448,11 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {/* Deductions */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">📉</span> Deductions
+                        <span className="text-lg">📉</span> {t.financials.deductions}
                       </h3>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Interest on Debt (Annual)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.financials.interestOnDebt}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4120,7 +4462,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                             />
                           </div>
-                          <p className="text-slate-400 text-xs mt-2">Mortgage interest, personal loan interest, etc.</p>
+                          <p className="text-slate-400 text-xs mt-2">{t.financials.debtPlaceholder}</p>
                         </div>
                       </div>
                     </div>
@@ -4134,13 +4476,13 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                       <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
                       </svg>
-                      Back
+                      {t.household.back}
                     </button>
                     <button
                       onClick={handleContinue}
                       className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 sm:px-6 py-2 sm:py-3 rounded-lg font-semibold transition-all text-sm sm:text-base"
                     >
-                      Continue
+                      {t.household.continue}
                       <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                       </svg>
@@ -4152,14 +4494,14 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               {/* Pension Step */}
               {currentStep === 'pension' && (
                 <div>
-                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Pension Details</h1>
-                  <p className="text-slate-400 mb-8 sm:mb-12">Help us optimize your pension and retirement plan.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">{t.pension.title}</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">{t.pension.subtitle}</p>
 
                   <div className="space-y-8">
                     {/* Pillar 1 - State Pension */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">🏥</span> Pillar 1 — State Pension (The Safety Net)
+                        <span className="text-lg">🏥</span> {t.pension.pillar1Title}
                         <div className="relative group ml-1">
                           <svg className="w-4 h-4 text-slate-400 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -4170,22 +4512,22 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           </div>
                         </div>
                       </h3>
-                      <p className="text-slate-400 text-sm mb-4">This determines your basic "floor" income provided by the government.</p>
+                      <p className="text-slate-400 text-sm mb-4">{t.pension.pillar1FloorDesc}</p>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">{formData.hasSpouse ? 'Your Arrival Age in the Netherlands' : 'Arrival Age in the Netherlands'}</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{formData.hasSpouse ? t.pension.arrivalAgePre : t.pension.arrivalAge}</label>
                           <input
                             type="number" onFocus={handleInputFocus}
                             value={formData.arrivalAgeNL}
                             onChange={(e) => updateFormData('arrivalAgeNL', Number(e.target.value))}
-                            placeholder="e.g. 0 if born here, 25 if moved at 25"
+                            placeholder={t.pension.arrivalPlaceholder}
                             className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                           />
-                          <p className="text-slate-400 text-xs mt-1">At what age did you first start living/working in the Netherlands?</p>
+                          <p className="text-slate-400 text-xs mt-1">{t.pension.arrivalAgePlaceholder}</p>
                         </div>
 
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Years Spent Abroad (Post-Arrival)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.pension.yearsAbroad}</label>
                           <input
                             type="number" onFocus={handleInputFocus}
                             value={formData.yearsAbroad}
@@ -4193,7 +4535,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             placeholder="0"
                             className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                           />
-                          <p className="text-slate-400 text-xs mt-1">Any years you lived outside NL after arrival (stops the 2% annual accrual)</p>
+                          <p className="text-slate-400 text-xs mt-1">{t.pension.yearsAbroadDesc}</p>
                         </div>
 
                         {/* AOW Preview */}
@@ -4203,10 +4545,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           return (
                             <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4">
                               <p className="text-emerald-400 text-sm font-medium">
-                                📊 Based on your arrival at age {formData.arrivalAgeNL}{formData.yearsAbroad > 0 ? ` and ${formData.yearsAbroad} year(s) abroad` : ''}, you will accrue <strong className="text-white">{accrualPct}%</strong> of the full state pension by age 67.
+                                📊 {t.pension.basedOnArrival} {formData.arrivalAgeNL}{formData.yearsAbroad > 0 ? ` ${t.pension.andAbroad} ${formData.yearsAbroad} ${t.pension.yearsAbroadLabel}` : ''}, {t.pension.willAccrue} <strong className="text-white">{accrualPct}%</strong> {t.pension.ofFullPension}
                               </p>
                               <p className="text-slate-400 text-xs mt-2">
-                                Estimated gross AOW: <strong className="text-white">€{Math.round(1637.57 * accrualPct / 100).toLocaleString()}/mo</strong> (based on €1,637.57 full single rate)
+                                {t.pension.estimatedAOW} <strong className="text-white">€{Math.round(1637.57 * accrualPct / 100).toLocaleString()}{t.pension.perMonth}</strong> (€1,637.57 full single rate)
                               </p>
                             </div>
                           );
@@ -4218,23 +4560,23 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {formData.hasSpouse && (
                       <div>
                         <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                          <span className="text-lg">👥</span> Spouse — State Pension
+                          <span className="text-lg">👥</span> {t.pension.spousePillar1}
                         </h3>
                         <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                           <div>
-                            <label className="block text-white font-medium mb-2 text-sm">Spouse Arrival Age in the Netherlands</label>
+                            <label className="block text-white font-medium mb-2 text-sm">{t.pension.spouseArrivalAge}</label>
                             <input
                               type="number" onFocus={handleInputFocus}
                               value={formData.spouseArrivalAgeNL}
                               onChange={(e) => updateFormData('spouseArrivalAgeNL', Number(e.target.value))}
-                              placeholder="e.g. 0 if born here, 25 if moved at 25"
+                              placeholder={t.pension.arrivalPlaceholder}
                               className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                             />
-                            <p className="text-slate-400 text-xs mt-1">At what age did your spouse first start living/working in the Netherlands?</p>
+                            <p className="text-slate-400 text-xs mt-1">{t.pension.spouseArrivalDesc}</p>
                           </div>
 
                           <div>
-                            <label className="block text-white font-medium mb-2 text-sm">Spouse Years Spent Abroad (Post-Arrival)</label>
+                            <label className="block text-white font-medium mb-2 text-sm">{t.pension.spouseYearsAbroad} (Post-Arrival)</label>
                             <input
                               type="number" onFocus={handleInputFocus}
                               value={formData.spouseYearsAbroad}
@@ -4242,7 +4584,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                               placeholder="0"
                               className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                             />
-                            <p className="text-slate-400 text-xs mt-1">Any years spouse lived outside NL after arrival</p>
+                            <p className="text-slate-400 text-xs mt-1">{t.pension.spouseYearsAbroadDesc}</p>
                           </div>
 
                           {/* Spouse AOW Preview */}
@@ -4252,10 +4594,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             return (
                               <div className="bg-emerald-500/10 border border-emerald-500/30 rounded-lg p-4">
                                 <p className="text-emerald-400 text-sm font-medium">
-                                  📊 Based on spouse's arrival at age {formData.spouseArrivalAgeNL}{formData.spouseYearsAbroad > 0 ? ` and ${formData.spouseYearsAbroad} year(s) abroad` : ''}, they will accrue <strong className="text-white">{accrualPct}%</strong> of the full state pension by age 67.
+                                  📊 {t.pension.spouseBasedOnArrival} {formData.spouseArrivalAgeNL}{formData.spouseYearsAbroad > 0 ? ` ${t.pension.andAbroad} ${formData.spouseYearsAbroad} ${t.pension.yearsAbroadLabel}` : ''}, {t.pension.willAccrue} <strong className="text-white">{accrualPct}%</strong> {t.pension.ofFullPension}
                                 </p>
                                 <p className="text-slate-400 text-xs mt-2">
-                                  Estimated gross AOW: <strong className="text-white">€{Math.round(1637.57 * accrualPct / 100).toLocaleString()}/mo</strong> (based on €1,637.57 full single rate)
+                                  {t.pension.estimatedAOW} <strong className="text-white">€{Math.round(1637.57 * accrualPct / 100).toLocaleString()}{t.pension.perMonth}</strong> (€1,637.57 full single rate)
                                 </p>
                               </div>
                             );
@@ -4267,12 +4609,12 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {/* Pillar 2 - Workplace Pension */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">🏢</span> Pillar 2 — Workplace Pension (The Employer Pot)
+                        <span className="text-lg">🏢</span> {t.pension.pillar2Title}
                       </h3>
-                      <p className="text-slate-400 text-sm mb-4">This captures the money built up through your current and past jobs.</p>
+                      <p className="text-slate-400 text-sm mb-4">{t.pension.pillar2Desc}</p>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">{formData.hasSpouse ? 'Your Total Built-up Pension' : 'Total Built-up Pension'}</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{formData.hasSpouse ? `${t.pension.builtUpPension} (${language === 'nl' ? 'Jouw' : 'Your'})` : t.pension.builtUpPension}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4283,19 +4625,19 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                             />
                           </div>
-                          <p className="text-slate-400 text-xs mt-1">Total value accrued across all employer pensions</p>
+                          <p className="text-slate-400 text-xs mt-1">{t.pension.builtUpDesc}</p>
                         </div>
 
                         <div>
                           <div className="flex items-center gap-2 mb-2">
-                            <label className="block text-white font-medium text-sm">Factor A (from your UPO)</label>
+                            <label className="block text-white font-medium text-sm">{t.pension.factorA}</label>
                             <div className="relative group">
                               <svg className="w-4 h-4 text-slate-400 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                               </svg>
                               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 bg-slate-700 text-white text-xs rounded-lg p-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-                                <p className="font-semibold text-emerald-400 mb-1">📍 Where is my Factor A?</p>
-                                <p>Check your most recent Uniform Pension Overview (UPO) from your employer's pension fund. It is typically found on the last page. If you have no employer pension, enter 0.</p>
+                                <p className="font-semibold text-emerald-400 mb-1">{t.pension.factorAWhereTitle}</p>
+                                <p>{t.pension.factorAWhereDesc}</p>
                                 <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700"></div>
                               </div>
                             </div>
@@ -4315,7 +4657,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                               className={`w-full bg-slate-800 border ${validationErrors.factorA ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                             />
                           </div>
-                          <p className="text-slate-400 text-xs mt-1">Annual pension accrual from employer</p>
+                          <p className="text-slate-400 text-xs mt-1">{t.pension.factorADesc}</p>
                           {validationErrors.factorA && (
                             <p className="text-red-500 text-sm mt-1">{validationErrors.factorA}</p>
                           )}
@@ -4327,7 +4669,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 6H6a2 2 0 00-2 2v10a2 2 0 002 2h10a2 2 0 002-2v-4M14 4h6m0 0v6m0-6L10 14" />
                           </svg>
                           <p className="text-blue-300 text-xs">
-                            Find this at <a href="https://www.mijnpensioenoverzicht.nl" target="_blank" rel="noopener noreferrer" className="text-blue-400 underline font-semibold hover:text-blue-300">mijnpensioenoverzicht.nl</a> or on your last Uniform Pension Overview (UPO), last page.
+                            {t.pension.findAt} <a href="https://www.mijnpensioenoverzicht.nl" target="_blank" rel="noopener noreferrer" className="text-blue-400 underline font-semibold hover:text-blue-300">mijnpensioenoverzicht.nl</a> {t.pension.orOnUPO}
                           </p>
                         </div>
 
@@ -4339,7 +4681,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           return (
                             <div className="bg-slate-800/50 rounded-lg p-4">
                               <div className="flex items-center justify-between mb-2">
-                                <p className="text-slate-300 text-sm font-medium">Retirement lifestyle coverage</p>
+                                <p className="text-slate-300 text-sm font-medium">{t.pension.retirementCoverage}</p>
                                 <span className={`text-sm font-bold ${coveragePct >= 70 ? 'text-emerald-400' : coveragePct >= 40 ? 'text-yellow-400' : 'text-red-400'}`}>{coveragePct}%</span>
                               </div>
                               <div className="w-full bg-slate-700 rounded-full h-3">
@@ -4349,7 +4691,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                                 ></div>
                               </div>
                               <p className="text-slate-400 text-xs mt-2">
-                                Your workplace pension currently covers <strong className="text-white">{coveragePct}%</strong> of your desired retirement lifestyle (~€{desiredMonthly.toLocaleString()}/mo based on 70% of gross salary)
+                                {t.pension.coverageCovers} <strong className="text-white">{coveragePct}%</strong> {t.pension.coverageOfLifestyle} (~€{desiredMonthly.toLocaleString()}{t.pension.perMonth} {t.pension.basedOn70})
                               </p>
                             </div>
                           );
@@ -4361,11 +4703,11 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {formData.hasSpouse && (
                       <div>
                         <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                          <span className="text-lg">👥</span> Spouse — Workplace Pension
+                          <span className="text-lg">👥</span> {t.pension.spousePillar2}
                         </h3>
                         <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                           <div>
-                            <label className="block text-white font-medium mb-2 text-sm">Spouse Total Built-up Pension</label>
+                            <label className="block text-white font-medium mb-2 text-sm">{t.pension.spouseBuiltUp}</label>
                             <div className="relative">
                               <span className="absolute left-4 top-3 text-slate-400">€</span>
                               <input
@@ -4376,19 +4718,19 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                                 className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                               />
                             </div>
-                            <p className="text-slate-400 text-xs mt-1">Total value accrued across spouse's employer pensions</p>
+                            <p className="text-slate-400 text-xs mt-1">{t.pension.spouseBuiltUpDesc}</p>
                           </div>
 
                           <div>
                             <div className="flex items-center gap-2 mb-2">
-                              <label className="block text-white font-medium text-sm">Spouse Factor A (from UPO)</label>
+                              <label className="block text-white font-medium text-sm">{t.pension.spouseFactorA}</label>
                               <div className="relative group">
                                 <svg className="w-4 h-4 text-slate-400 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                                 </svg>
                                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 bg-slate-700 text-white text-xs rounded-lg p-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-                                  <p className="font-semibold text-emerald-400 mb-1">📍 Where is my Factor A?</p>
-                                  <p>Check your most recent Uniform Pension Overview (UPO) from your employer's pension fund. It is typically found on the last page. If you have no employer pension, enter 0.</p>
+                                  <p className="font-semibold text-emerald-400 mb-1">{language === 'nl' ? '📍 Waar vind ik mijn Factor A?' : '📍 Where is my Factor A?'}</p>
+                                  <p>{language === 'nl' ? 'Controleer je meest recente Uniform Pensioenoverzicht (UPO) van het pensioenfonds van je werkgever. Het staat meestal op de laatste pagina. Heb je geen werkgeverspensioen, vul dan 0 in.' : 'Check your most recent Uniform Pension Overview (UPO) from your employer\'s pension fund. It is typically found on the last page. If you have no employer pension, enter 0.'}</p>
                                   <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700"></div>
                                 </div>
                               </div>
@@ -4408,7 +4750,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                                 className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                               />
                             </div>
-                            <p className="text-slate-400 text-xs mt-1">Annual pension accrual from spouse's employer</p>
+                            <p className="text-slate-400 text-xs mt-1">{t.pension.spouseFactorADesc}</p>
                           </div>
 
                           {/* Spouse Coverage Progress */}
@@ -4419,7 +4761,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             return (
                               <div className="bg-slate-800/50 rounded-lg p-4">
                                 <div className="flex items-center justify-between mb-2">
-                                  <p className="text-slate-300 text-sm font-medium">Spouse retirement coverage</p>
+                                  <p className="text-slate-300 text-sm font-medium">{t.pension.spouseCoverage}</p>
                                   <span className={`text-sm font-bold ${coveragePct >= 70 ? 'text-emerald-400' : coveragePct >= 40 ? 'text-yellow-400' : 'text-red-400'}`}>{coveragePct}%</span>
                                 </div>
                                 <div className="w-full bg-slate-700 rounded-full h-3">
@@ -4429,7 +4771,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                                   ></div>
                                 </div>
                                 <p className="text-slate-400 text-xs mt-2">
-                                  Spouse workplace pension covers <strong className="text-white">{coveragePct}%</strong> of desired retirement (~€{desiredMonthly.toLocaleString()}/mo)
+                                  {t.pension.spouseCoverageCovers} <strong className="text-white">{coveragePct}%</strong> {t.pension.spouseCoverageOf} (~€{desiredMonthly.toLocaleString()}{t.pension.perMonth})
                                 </p>
                               </div>
                             );
@@ -4441,12 +4783,12 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {/* Pillar 3 - Private Savings (The Tax Shield) */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">🛡️</span> {formData.hasSpouse ? 'Your Pillar 3 — Private Savings (The Tax Shield)' : 'Pillar 3 — Private Savings (The Tax Shield)'}
+                        <span className="text-lg">🛡️</span> {formData.hasSpouse ? `${language === 'nl' ? 'Jouw' : 'Your'} ${t.pension.pillar3Title}` : t.pension.pillar3Title}
                       </h3>
-                      <p className="text-slate-400 text-sm mb-4">See how you can "beat the system" using tax-deductible accounts.</p>
+                      <p className="text-slate-400 text-sm mb-4">{t.pension.pillar3BeatSystem}</p>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Jaarruimte (Tax-Deductible Pension Room)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.pension.jaarruimte}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4457,7 +4799,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             />
                           </div>
                           <p className="text-slate-400 text-xs mt-1">
-                            Auto-calculated: 30% × (€{Math.min(formData.grossSalary, 137800).toLocaleString()} - €19,172) - (6.27 × €{formData.factorA.toLocaleString()})
+                            {t.pension.jaarruimteAutoCalc} 30% × (€{Math.min(formData.grossSalary, 137800).toLocaleString()} - €19,172) - (6.27 × €{formData.factorA.toLocaleString()})
                           </p>
                           {validationErrors.jaarruimte && (
                             <p className="text-red-500 text-sm mt-1">{validationErrors.jaarruimte}</p>
@@ -4465,7 +4807,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         </div>
 
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Unused Reserveringsruimte (Catch-up Room)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.pension.reserveringsruimte}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4476,7 +4818,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                             />
                           </div>
-                          <p className="text-slate-400 text-xs mt-1">Unused tax-deductible pension room from the previous 10 years (max €42,753 in 2026)</p>
+                          <p className="text-slate-400 text-xs mt-1">{t.pension.reserveringsDesc}</p>
                         </div>
 
                         {/* Tax Refund Alert */}
@@ -4485,9 +4827,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             <div className="flex items-start gap-3">
                               <span className="text-amber-400 text-lg">⚡</span>
                               <div>
-                                <p className="text-amber-400 text-sm font-semibold mb-1">Immediate Tax Refund Opportunity</p>
+                                <p className="text-amber-400 text-sm font-semibold mb-1">{language === 'nl' ? 'Directe Belastingteruggave Mogelijkheid' : 'Immediate Tax Refund Opportunity'}</p>
                                 <p className="text-slate-300 text-xs leading-relaxed">
-                                  Using this room today could trigger an immediate tax refund of up to <strong className="text-white">49.5%</strong>. On €{(formData.jaarruimte + formData.reserveringsruimte).toLocaleString()} total room, that’s up to <strong className="text-white">€{Math.round((formData.jaarruimte + formData.reserveringsruimte) * 0.495).toLocaleString()}</strong> back.
+                                  {language === 'nl' ? 'Deze ruimte vandaag benutten kan een directe belastingteruggave opleveren van maximaal' : 'Using this room today could trigger an immediate tax refund of up to'} <strong className="text-white">49.5%</strong>. On €{(formData.jaarruimte + formData.reserveringsruimte).toLocaleString()} {language === 'nl' ? 'totale ruimte is dat maximaal' : 'total room, that’s up to'} <strong className="text-white">€{Math.round((formData.jaarruimte + formData.reserveringsruimte) * 0.495).toLocaleString()}</strong> {language === 'nl' ? 'terug.' : 'back.'}
                                 </p>
                               </div>
                             </div>
@@ -4499,9 +4841,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           <div className="flex items-start gap-3">
                             <span className="text-emerald-400 text-lg">🛡️</span>
                             <div>
-                              <p className="text-emerald-400 text-sm font-semibold mb-1">Box 3 Shielding</p>
+                              <p className="text-emerald-400 text-sm font-semibold mb-1">{t.pension.box3Shielding}</p>
                               <p className="text-slate-300 text-xs leading-relaxed">
-                                Assets in Pillar 3 accounts are <strong className="text-white">100% exempt</strong> from the 2026 Box 3 wealth tax. Every euro you move here is shielded from the 7.78% fictitious return tax.
+                                {t.pension.box3ShieldDesc}
                               </p>
                             </div>
                           </div>
@@ -4513,11 +4855,11 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {formData.hasSpouse && (
                       <div>
                         <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                          <span className="text-lg">👥</span> Spouse Pillar 3 — Private Savings (The Tax Shield)
+                          <span className="text-lg">👥</span> {t.pension.spousePillar3Title}
                         </h3>
                         <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                           <div>
-                            <label className="block text-white font-medium mb-2 text-sm">Spouse Jaarruimte (Tax-Deductible Pension Room)</label>
+                            <label className="block text-white font-medium mb-2 text-sm">{t.pension.spouseJaarruimteLabel}</label>
                             <div className="relative">
                               <span className="absolute left-4 top-3 text-slate-400">€</span>
                               <input
@@ -4533,7 +4875,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           </div>
 
                           <div>
-                            <label className="block text-white font-medium mb-2 text-sm">Spouse Unused Reserveringsruimte</label>
+                            <label className="block text-white font-medium mb-2 text-sm">{t.pension.spouseReserveringsLabel}</label>
                             <div className="relative">
                               <span className="absolute left-4 top-3 text-slate-400">€</span>
                               <input
@@ -4544,7 +4886,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                                 className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                               />
                             </div>
-                            <p className="text-slate-400 text-xs mt-1">Spouse's unused catch-up room from the previous 10 years</p>
+                            <p className="text-slate-400 text-xs mt-1">{t.pension.spouseReserveringsDesc}</p>
                           </div>
 
                           {(formData.spouseJaarruimte > 0 || formData.spouseReserveringsruimte > 0) && (
@@ -4552,9 +4894,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                               <div className="flex items-start gap-3">
                                 <span className="text-amber-400 text-lg">⚡</span>
                                 <div>
-                                  <p className="text-amber-400 text-sm font-semibold mb-1">Spouse Tax Refund Opportunity</p>
+                                  <p className="text-amber-400 text-sm font-semibold mb-1">{t.pension.spouseTaxRefund}</p>
                                   <p className="text-slate-300 text-xs leading-relaxed">
-                                    Using this room could trigger a refund of up to <strong className="text-white">€{Math.round((formData.spouseJaarruimte + formData.spouseReserveringsruimte) * 0.495).toLocaleString()}</strong>.
+                                    {t.pension.spouseTaxRefundDesc} <strong className="text-white">€{Math.round((formData.spouseJaarruimte + formData.spouseReserveringsruimte) * 0.495).toLocaleString()}</strong>.
                                   </p>
                                 </div>
                               </div>
@@ -4583,10 +4925,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             </div>
                             <div className="flex-1">
                               <h4 className="text-red-400 font-bold text-lg mb-1">
-                                Current Pension Gap: €{gap.toLocaleString()} per month
+                                {t.pension.pensionGap} €{gap.toLocaleString()} {t.pension.pensionGapUnit}
                               </h4>
                               <p className="text-slate-300 text-sm leading-relaxed">
-                                Your Pillars 1 and 2 currently fall short of your <strong className="text-white">€{desiredMonthly.toLocaleString()}/mo</strong> lifestyle (AOW: €{aowMonthly.toLocaleString()} + Workplace: €{pillar2Monthly.toLocaleString()} = €{totalCovered.toLocaleString()}/mo). The <strong className="text-emerald-400">AI Strategy PDF</strong> will show you exactly how to fill this gap using Pillar 3 and Real Estate.
+                                {t.pension.gapPillars12short} <strong className="text-white">€{desiredMonthly.toLocaleString()}{t.pension.perMonth}</strong> {t.pension.gapLifestyle} (AOW: €{aowMonthly.toLocaleString()} + Workplace: €{pillar2Monthly.toLocaleString()} = €{totalCovered.toLocaleString()}{t.pension.perMonth}). <strong className="text-emerald-400">AI Strategy PDF</strong> {t.pension.gapAIStrategy}
                               </p>
                             </div>
                           </div>
@@ -4600,9 +4942,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                               </svg>
                             </div>
                             <div className="flex-1">
-                              <h4 className="text-emerald-400 font-bold text-lg mb-1">No Pension Gap — Well Done!</h4>
+                              <h4 className="text-emerald-400 font-bold text-lg mb-1">{t.pension.noPensionGap}</h4>
                               <p className="text-slate-300 text-sm leading-relaxed">
-                                Your Pillars 1 and 2 cover your <strong className="text-white">€{desiredMonthly.toLocaleString()}/mo</strong> target. The AI Strategy PDF can still optimize your tax position and grow your wealth further.
+                                {t.pension.noGapPillars} <strong className="text-white">€{desiredMonthly.toLocaleString()}{t.pension.perMonth}</strong> {t.pension.noGapTarget}
                               </p>
                             </div>
                           </div>
@@ -4619,13 +4961,13 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                       <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
                       </svg>
-                      Back
+                      {t.household.back}
                     </button>
                     <button
                       onClick={handleContinue}
                       className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 sm:px-6 py-2 sm:py-3 rounded-lg font-semibold transition-all text-sm sm:text-base"
                     >
-                      Continue
+                      {t.household.continue}
                       <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                       </svg>
@@ -4637,25 +4979,25 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               {/* Real Estate Step */}
               {currentStep === 'realEstate' && (
                 <div>
-                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Property & Mortgage</h1>
-                  <p className="text-slate-400 mb-8 sm:mb-12">Identify hidden wealth and tax-saving opportunities in your real estate.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">{t.realEstate.title}</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">{t.realEstate.subtitle}</p>
 
                   <div className="space-y-8">
                     {/* Current Primary Residence (Box 1) */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">🏠</span> Current Primary Residence (Box 1)
+                        <span className="text-lg">🏠</span> {t.realEstate.box1Title}
                       </h3>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
                           <div className="flex items-center gap-2 mb-2">
-                            <label className="block text-white font-medium text-sm">Current Market / WOZ Value</label>
+                            <label className="block text-white font-medium text-sm">{t.realEstate.wozValue}</label>
                             <div className="relative group">
                               <svg className="w-4 h-4 text-slate-400 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                               </svg>
                               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 bg-slate-700 text-white text-xs rounded-lg p-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-                                <p>Check <a href="https://www.wozwaardeloket.nl" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline">wozwaardeloket.nl</a> for the most recent official valuation.</p>
+                                <p>{language === 'nl' ? 'Controleer' : 'Check'} <a href="https://www.wozwaardeloket.nl" target="_blank" rel="noopener noreferrer" className="text-emerald-400 underline">wozwaardeloket.nl</a> {language === 'nl' ? 'voor de meest recente officiële taxatie.' : 'for the most recent official valuation.'}</p>
                                 <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700"></div>
                               </div>
                             </div>
@@ -4672,14 +5014,14 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                         </div>
 
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Mortgage Balance</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.realEstate.mortgageBalance}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
                               type="number" onFocus={handleInputFocus}
                               value={formData.mortgageBalance}
                               onChange={(e) => updateFormData('mortgageBalance', Number(e.target.value))}
-                              placeholder="Remaining principal on your loan"
+                              placeholder={t.realEstate.mortgagePlaceholder}
                               className={`w-full bg-slate-800 border ${validationErrors.mortgageBalance ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                             />
                           </div>
@@ -4690,13 +5032,13 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
                         <div>
                           <div className="flex items-center gap-2 mb-2">
-                            <label className="block text-white font-medium text-sm">Interest Rate (%)</label>
+                            <label className="block text-white font-medium text-sm">{t.realEstate.interestRate}</label>
                             <div className="relative group">
                               <svg className="w-4 h-4 text-slate-400 cursor-help" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
                               </svg>
                               <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 w-72 bg-slate-700 text-white text-xs rounded-lg p-3 shadow-xl opacity-0 invisible group-hover:opacity-100 group-hover:visible transition-all z-50">
-                                <p>Log in to your bank portal (e.g., ING, Rabo) under "Hypotheek" details. Check if it's Annuity, Linear, or Interest-only on your annual bank statement.</p>
+                                <p>{language === 'nl' ? 'Log in op je bankportaal (bijv. ING, Rabo) onder "Hypotheek" details. Controleer of het Annuïteit, Lineair of Aflossingsvrij is op je jaaroverzicht.' : 'Log in to your bank portal (e.g., ING, Rabo) under "Hypotheek" details. Check if it\'s Annuity, Linear, or Interest-only on your annual bank statement.'}</p>
                                 <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-slate-700"></div>
                               </div>
                             </div>
@@ -4712,19 +5054,19 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             />
                             <span className="absolute right-4 top-3 text-slate-400">%</span>
                           </div>
-                          <p className="text-slate-400 text-xs mt-1">Crucial for comparing debt costs vs. investment returns</p>
+                          <p className="text-slate-400 text-xs mt-1">{t.realEstate.crucialComparing}</p>
                           {validationErrors.mortgageInterestRate && (
                             <p className="text-red-500 text-sm mt-1">{validationErrors.mortgageInterestRate}</p>
                           )}
                         </div>
 
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Remaining Term (Years)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.realEstate.remainingTerm}</label>
                           <input
                             type="number" onFocus={handleInputFocus}
                             value={formData.mortgageYearsLeft}
                             onChange={(e) => updateFormData('mortgageYearsLeft', Number(e.target.value))}
-                            placeholder="When will the monthly burn rate drop to zero?"
+                            placeholder={t.realEstate.remainingPlaceholder}
                             className={`w-full bg-slate-800 border ${validationErrors.mortgageYearsLeft ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                           />
                           {validationErrors.mortgageYearsLeft && (
@@ -4737,12 +5079,12 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {/* The "Upgrade" Scenario */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">🎯</span> The "Upgrade" Scenario (Strategy Hook)
+                        <span className="text-lg">🎯</span> {t.realEstate.upgradeTitle}
                       </h3>
-                      <p className="text-slate-400 text-sm mb-4">Planning a property upgrade? Tell us your dream home.</p>
+                      <p className="text-slate-400 text-sm mb-4">{t.realEstate.upgradeDreamHome}</p>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Target Property Value</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.realEstate.targetValue}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4755,14 +5097,14 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           </div>
                         </div>
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Planned Move Date</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.realEstate.plannedMove}</label>
                           <input
                             type="date"
                             value={formData.plannedMoveDate}
                             onChange={(e) => updateFormData('plannedMoveDate', e.target.value)}
                             className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                           />
-                          <p className="text-slate-400 text-xs mt-1">When do you intend to switch properties?</p>
+                          <p className="text-slate-400 text-xs mt-1">{t.realEstate.movePlaceholder}</p>
                         </div>
                       </div>
                     </div>
@@ -4770,11 +5112,11 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {/* Investment Real Estate */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">🏢</span> Investment Real Estate (if any)
+                        <span className="text-lg">🏢</span> {t.realEstate.investmentRE}
                       </h3>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Rental Income (Annual)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.realEstate.rentalIncome}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4786,7 +5128,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           </div>
                         </div>
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Property Sale Proceeds (2025)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.realEstate.saleProceeds}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4796,10 +5138,10 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                             />
                           </div>
-                          <p className="text-slate-400 text-xs mt-2">If you sold investment property in the tax year</p>
+                          <p className="text-slate-400 text-xs mt-2">{t.realEstate.soldInTaxYear}</p>
                         </div>
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Original Purchase Price</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.realEstate.purchasePrice}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4816,11 +5158,11 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {/* Loss Carry-Forward */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">📋</span> Loss Carry-Forward
+                        <span className="text-lg">📋</span> {t.realEstate.lossCarryForward}
                       </h3>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Prior Year Loss (Box 3)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.realEstate.priorYearLoss}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
@@ -4830,7 +5172,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                               className="w-full bg-slate-800 border border-slate-700 text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                             />
                           </div>
-                          <p className="text-slate-400 text-xs mt-2">Loss from 2024 or earlier that can be deducted</p>
+                          <p className="text-slate-400 text-xs mt-2">{t.realEstate.lossDeduct}</p>
                         </div>
                       </div>
                     </div>
@@ -4839,7 +5181,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {formData.propertyValue > 0 && formData.mortgageBalance > 0 && (
                       <div>
                         <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                          <span className="text-lg">📈</span> Your Tax Analysis
+                          <span className="text-lg">📈</span> {t.realEstate.taxAnalysis}
                         </h3>
                         {(() => {
                           const equity = formData.propertyValue - formData.mortgageBalance;
@@ -4857,26 +5199,26 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             <div className="space-y-4">
                               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                                 <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
-                                  <p className="text-slate-400 text-xs mb-1">Box 3 Tax Savings</p>
-                                  <p className="text-emerald-400 text-xl font-bold">€{box3TaxSavings.toLocaleString()}/yr</p>
-                                  <p className="text-slate-500 text-xs mt-1">By moving cash to home equity</p>
+                                  <p className="text-slate-400 text-xs mb-1">{t.realEstate.box3TaxSavings}</p>
+                                  <p className="text-emerald-400 text-xl font-bold">€{box3TaxSavings.toLocaleString()}/{language === 'nl' ? 'jr' : 'yr'}</p>
+                                  <p className="text-slate-500 text-xs mt-1">{t.realEstate.byMovingCash}</p>
                                 </div>
                                 <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
-                                  <p className="text-slate-400 text-xs mb-1">HRA Tax Refund</p>
-                                  <p className="text-emerald-400 text-xl font-bold">€{hraRefund.toLocaleString()}/yr</p>
-                                  <p className="text-slate-500 text-xs mt-1">Effective rate: {effectiveRate.toFixed(2)}%</p>
+                                  <p className="text-slate-400 text-xs mb-1">{t.realEstate.hraTaxRefund}</p>
+                                  <p className="text-emerald-400 text-xl font-bold">€{hraRefund.toLocaleString()}/{language === 'nl' ? 'jr' : 'yr'}</p>
+                                  <p className="text-slate-500 text-xs mt-1">{t.realEstate.effectiveRate} {effectiveRate.toFixed(2)}%</p>
                                 </div>
                                 <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
-                                  <p className="text-slate-400 text-xs mb-1">Net Tax Benefit</p>
-                                  <p className={`text-xl font-bold ${netTaxBenefit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>€{netTaxBenefit.toLocaleString()}/yr</p>
-                                  <p className="text-slate-500 text-xs mt-1">HRA refund minus eigenwoningforfait</p>
+                                  <p className="text-slate-400 text-xs mb-1">{t.realEstate.netTaxBenefit}</p>
+                                  <p className={`text-xl font-bold ${netTaxBenefit >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>€{netTaxBenefit.toLocaleString()}/{language === 'nl' ? 'jr' : 'yr'}</p>
+                                  <p className="text-slate-500 text-xs mt-1">{t.realEstate.hraMinusEwf}</p>
                                 </div>
                               </div>
 
                               {/* Eigenwoningforfait breakdown */}
                               <div className="bg-slate-800/30 rounded-lg p-3 border border-slate-700">
                                 <p className="text-slate-400 text-xs">
-                                  <strong className="text-slate-300">Eigenwoningforfait:</strong> €{eigenwoningforfait.toLocaleString()}/yr (imputed rent, {formData.propertyValue <= 1310000 ? '0.35%' : '2.35%'} of WOZ) • <strong className="text-slate-300">Net:</strong> HRA €{hraRefund.toLocaleString()} - EWF tax €{Math.round(eigenwoningforfait * 0.3748).toLocaleString()} = <strong className={netTaxBenefit >= 0 ? 'text-emerald-400' : 'text-red-400'}>€{netTaxBenefit.toLocaleString()}</strong>
+                                  <strong className="text-slate-300">Eigenwoningforfait:</strong> €{eigenwoningforfait.toLocaleString()}{language === 'nl' ? '/jr' : '/yr'} ({language === 'nl' ? 'huurwaarde,' : 'imputed rent,'} {formData.propertyValue <= 1310000 ? '0,35%' : '2,35%'} {language === 'nl' ? 'van' : 'of'} WOZ) • <strong className="text-slate-300">{language === 'nl' ? 'Netto' : 'Net'}:</strong> HRA €{hraRefund.toLocaleString()} - EWF {language === 'nl' ? 'belasting' : 'tax'} €{Math.round(eigenwoningforfait * 0.3748).toLocaleString()} = <strong className={netTaxBenefit >= 0 ? 'text-emerald-400' : 'text-red-400'}>€{netTaxBenefit.toLocaleString()}</strong>
                                 </p>
                               </div>
                             </div>
@@ -4898,9 +5240,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                               <div className="flex items-start gap-3">
                                 <span className="text-2xl">🛡️</span>
                                 <div>
-                                  <h4 className="text-amber-400 font-bold mb-1">The "House as a Shield" Alert</h4>
+                                  <h4 className="text-amber-400 font-bold mb-1">{t.realEstate.houseShield}</h4>
                                   <p className="text-slate-300 text-sm leading-relaxed">
-                                    Your current setup leaves <strong className="text-white">€{exposedWealth.toLocaleString()}</strong> in assets exposed to the 2028 Box 3 'Actual Return' tax. Moving this to a primary residence could <strong className="text-emerald-400">shield this wealth entirely</strong>.
+                                    <strong className="text-white">€{exposedWealth.toLocaleString()}</strong> {t.realEstate.houseShieldExposed} <strong className="text-emerald-400">{t.realEstate.shieldWealth}</strong>.
                                   </p>
                                 </div>
                               </div>
@@ -4914,9 +5256,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             <div className="flex items-start gap-3">
                               <span className="text-2xl">⚖️</span>
                               <div>
-                                <h4 className="text-blue-400 font-bold mb-1">The "Buy vs. Invest" Verdict</h4>
+                                <h4 className="text-blue-400 font-bold mb-1">{language === 'nl' ? 'Het "Kopen vs. Beleggen" Oordeel' : 'The "Buy vs. Invest" Verdict'}</h4>
                                 <p className="text-slate-300 text-sm leading-relaxed">
-                                  Should you pay off your <strong className="text-white">{formData.mortgageInterestRate}%</strong> mortgage or keep the money in the AEX? Our AI found a <strong className="text-white">€{Math.round(formData.mortgageBalance * Math.abs(0.08 - formData.mortgageInterestRate / 100) * 10).toLocaleString()}</strong> difference in your 10-year outlook. <strong className="text-emerald-400">Get the full verdict in your PDF</strong>.
+                                  {language === 'nl' ? 'Moet je je' : 'Should you pay off your'} <strong className="text-white">{formData.mortgageInterestRate}%</strong> {language === 'nl' ? 'hypotheek aflossen of het geld in de AEX houden? Onze AI vond een' : 'mortgage or keep the money in the AEX? Our AI found a'} <strong className="text-white">€{Math.round(formData.mortgageBalance * Math.abs(0.08 - formData.mortgageInterestRate / 100) * 10).toLocaleString()}</strong> {language === 'nl' ? 'verschil in je 10-jaars vooruitzicht.' : 'difference in your 10-year outlook.'} <strong className="text-emerald-400">{language === 'nl' ? 'Bekijk het volledige oordeel in je PDF' : 'Get the full verdict in your PDF'}</strong>.
                                 </p>
                               </div>
                             </div>
@@ -4929,7 +5271,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {formData.homeValue > 0 && (
                       <div className="bg-yellow-900/20 border border-yellow-700/50 rounded-lg p-4">
                         <p className="text-yellow-300 text-xs">
-                          <strong>Note:</strong> Update Property Value above to sync primary residence details.
+                          <strong>{language === 'nl' ? 'Let op:' : 'Note:'}</strong> {t.realEstate.noteUpdateProperty}
                         </p>
                       </div>
                     )}
@@ -4943,13 +5285,13 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                       <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
                       </svg>
-                      Back
+                      {t.household.back}
                     </button>
                     <button
                       onClick={handleContinue}
                       className="flex items-center gap-2 bg-emerald-500 hover:bg-emerald-600 text-white px-4 sm:px-6 py-2 sm:py-3 rounded-lg font-semibold transition-all text-sm sm:text-base"
                     >
-                      Continue
+                      {t.household.continue}
                       <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M14 5l7 7m0 0l-7 7m7-7H3" />
                       </svg>
@@ -4961,18 +5303,18 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               {/* Retirement Step */}
               {currentStep === 'retirement' && (
                 <div>
-                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">Retirement — The Finish Line</h1>
-                  <p className="text-slate-400 mb-8 sm:mb-12">Define your freedom date and uncover the hidden risks of early retirement in the Netherlands.</p>
+                  <h1 className="text-3xl sm:text-4xl font-bold text-white mb-3">{t.retirement.title}</h1>
+                  <p className="text-slate-400 mb-8 sm:mb-12">{t.retirement.subtitleFull}</p>
 
                   <div className="space-y-8">
                     {/* Core Retirement Inputs */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">🎯</span> Your Retirement Target
+                        <span className="text-lg">🎯</span> {t.retirement.targetTitle}
                       </h3>
                       <div className="bg-slate-900/20 rounded-lg p-4 space-y-4">
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Target Retirement Age</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.retirement.targetAge}</label>
                           <input
                             type="number" onFocus={handleInputFocus}
                             value={formData.targetRetirementAge}
@@ -4981,20 +5323,20 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             max="80"
                             className={`w-full bg-slate-800 border ${validationErrors.targetRetirementAge ? 'border-red-500' : 'border-slate-700'} text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                           />
-                          <p className="text-slate-400 text-xs mt-1">The age you want to stop working — your "Freedom Date"</p>
+                          <p className="text-slate-400 text-xs mt-1">{t.retirement.freedomDateDesc}</p>
                           {validationErrors.targetRetirementAge && (
                             <p className="text-red-500 text-sm mt-1">{validationErrors.targetRetirementAge}</p>
                           )}
                         </div>
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Desired Monthly Net Income</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.retirement.monthlyIncome}</label>
                           <div className="relative">
                             <span className="absolute left-4 top-3 text-slate-400">€</span>
                             <input
                               type="number" onFocus={handleInputFocus}
                               value={formData.desiredMonthlyIncome}
                               onChange={(e) => updateFormData('desiredMonthlyIncome', Number(e.target.value))}
-                              placeholder="How much do you need to live comfortably?"
+                              placeholder={t.retirement.monthlyPlaceholder}
                               className={`w-full bg-slate-800 border ${validationErrors.desiredMonthlyIncome ? 'border-red-500' : 'border-slate-700'} text-white pl-8 pr-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500`}
                             />
                           </div>
@@ -5003,7 +5345,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           )}
                         </div>
                         <div>
-                          <label className="block text-white font-medium mb-2 text-sm">Life Expectancy (for modelling)</label>
+                          <label className="block text-white font-medium mb-2 text-sm">{t.retirement.lifeExpectancy}</label>
                           <input
                             type="number" onFocus={handleInputFocus}
                             value={formData.lifeExpectancy}
@@ -5012,7 +5354,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             max="110"
                             className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-lg focus:outline-none focus:ring-2 focus:ring-emerald-500"
                           />
-                          <p className="text-slate-400 text-xs mt-1">Default: 90. How long your nest egg must last.</p>
+                          <p className="text-slate-400 text-xs mt-1">{t.retirement.lifeExpectancyDesc}</p>
                         </div>
                       </div>
                     </div>
@@ -5020,7 +5362,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     {/* AOW Start Date (Auto-Calculated) */}
                     <div>
                       <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                        <span className="text-lg">🏛️</span> AOW Start Date (Auto-Calculated)
+                        <span className="text-lg">🏛️</span> {t.retirement.aowStart}
                       </h3>
                       {(() => {
                         const birthYear = new Date().getFullYear() - formData.age;
@@ -5053,25 +5395,25 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             {/* AOW info box */}
                             <div className="bg-slate-800/50 rounded-lg p-4 border border-slate-700">
                               <div className="flex items-center justify-between mb-2">
-                                <p className="text-slate-400 text-sm">Your projected AOW age</p>
+                                <p className="text-slate-400 text-sm">{t.retirement.aowAge}</p>
                                 <span className="bg-emerald-500/20 text-emerald-400 px-3 py-1 rounded-full text-sm font-bold">{aowAgeLabel}</span>
                               </div>
-                              <p className="text-slate-500 text-xs">Based on birth year ~{birthYear}. 2026–2027: 67 yrs • 2028–2031: 67 yrs 3 mo</p>
+                              <p className="text-slate-500 text-xs">{language === 'nl' ? `Op basis van geboortejaar ~${birthYear}. 2026–2027: 67 jr • 2028–2031: 67 jr 3 mnd` : `Based on birth year ~${birthYear}. 2026–2027: 67 yrs • 2028–2031: 67 yrs 3 mo`}</p>
                             </div>
 
                             {/* The Bridge Phase Visual */}
                             {bridgeYears > 0 && (
                               <div>
                                 <h3 className="text-white font-semibold mb-4 flex items-center gap-2">
-                                  <span className="text-lg">🌉</span> The Bridge Phase
+                                  <span className="text-lg">🌉</span> {t.retirement.bridgePhase}
                                 </h3>
                                 <div className="bg-slate-900/30 rounded-xl p-5 border border-slate-700">
                                   {/* Timeline bar */}
                                   <div className="mb-6">
                                     <div className="flex items-center justify-between text-xs text-slate-400 mb-2">
-                                      <span>Age {formData.targetRetirementAge}</span>
-                                      <span>Age {Math.ceil(aowStartAge)}</span>
-                                      <span>Age {formData.lifeExpectancy}</span>
+                                      <span>{language === 'nl' ? 'Leeftijd' : 'Age'} {formData.targetRetirementAge}</span>
+                                      <span>{language === 'nl' ? 'Leeftijd' : 'Age'} {Math.ceil(aowStartAge)}</span>
+                                      <span>{language === 'nl' ? 'Leeftijd' : 'Age'} {formData.lifeExpectancy}</span>
                                     </div>
                                     <div className="w-full h-4 bg-slate-800 rounded-full overflow-hidden flex">
                                       {(() => {
@@ -5101,8 +5443,8 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                                       })()}
                                     </div>
                                     <div className="flex items-center gap-4 mt-2">
-                                      <div className="flex items-center gap-1"><div className="w-3 h-3 rounded bg-gradient-to-r from-red-500 to-amber-500"></div><span className="text-xs text-slate-400">Bridge (self-funded)</span></div>
-                                      <div className="flex items-center gap-1"><div className="w-3 h-3 rounded bg-emerald-500"></div><span className="text-xs text-slate-400">AOW + Pension active</span></div>
+                                      <div className="flex items-center gap-1"><div className="w-3 h-3 rounded bg-gradient-to-r from-red-500 to-amber-500"></div><span className="text-xs text-slate-400">{t.retirement.bridgeSelfFunded}</span></div>
+                                      <div className="flex items-center gap-1"><div className="w-3 h-3 rounded bg-emerald-500"></div><span className="text-xs text-slate-400">{t.retirement.aowPensionActive}</span></div>
                                     </div>
                                   </div>
 
@@ -5111,14 +5453,14 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                                     <div className="flex items-start gap-3">
                                       <span className="text-xl">⚠️</span>
                                       <p className="text-red-300 text-sm leading-relaxed">
-                                        <strong className="text-red-200">Warning:</strong> You must independently finance the next <strong className="text-white">{Math.round(bridgeYears)} years</strong> before the government provides any support. That's <strong className="text-white">{Math.round(bridgeYears) * 12} months</strong> of living expenses from your own pocket.
+                                        <strong className="text-red-200">{language === 'nl' ? 'Waarschuwing:' : 'Warning:'}</strong> {t.retirement.bridgeWarningFull} <strong className="text-white">{Math.round(bridgeYears)} {language === 'nl' ? 'jaar' : 'years'}</strong> {language === 'nl' ? 'voordat de overheid enige ondersteuning biedt. Dat zijn' : 'before the government provides any support. That\'s'} <strong className="text-white">{Math.round(bridgeYears) * 12} {t.retirement.bridgeMonths}</strong>
                                       </p>
                                     </div>
                                   </div>
 
                                   {/* Wealth Burn-Rate Visual */}
                                   <div className="mb-5">
-                                    <h4 className="text-white font-medium text-sm mb-3">Wealth Burn-Rate Projection</h4>
+                                    <h4 className="text-white font-medium text-sm mb-3">{t.retirement.wealthBurnRate}</h4>
                                     <div className="relative h-32 bg-slate-800/50 rounded-lg border border-slate-700 overflow-hidden p-3">
                                       <svg viewBox="0 0 400 100" className="w-full h-full" preserveAspectRatio="none">
                                         {/* Grid lines */}
@@ -5150,31 +5492,31 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                                                   <stop offset="100%" stopColor="#10b981" />
                                                 </linearGradient>
                                               </defs>
-                                              <text x={bridgeX + 4} y="12" fill="#f59e0b" fontSize="8" fontWeight="bold">AOW starts</text>
+                                              <text x={bridgeX + 4} y="12" fill="#f59e0b" fontSize="8" fontWeight="bold">{t.retirement.aowStarts}</text>
                                             </>
                                           );
                                         })()}
                                       </svg>
-                                      <div className="absolute bottom-1 left-3 text-[10px] text-slate-500">Capital over time →</div>
+                                      <div className="absolute bottom-1 left-3 text-[10px] text-slate-500">{t.retirement.capitalOverTime}</div>
                                     </div>
                                   </div>
 
                                   {/* The "Gap to Fill" Counter */}
                                   <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                                     <div className="bg-red-500/10 border border-red-500/30 rounded-lg p-4 text-center">
-                                      <p className="text-slate-400 text-xs mb-1">Bridge Phase Cost</p>
+                                      <p className="text-slate-400 text-xs mb-1">{t.retirement.bridgeCost}</p>
                                       <p className="text-red-400 text-2xl font-black">€{bridgeGap.toLocaleString()}</p>
                                       <p className="text-slate-500 text-xs mt-1">{Math.round(bridgeYears)} yrs × €{monthlyNeed.toLocaleString()}/mo</p>
                                     </div>
                                     <div className="bg-amber-500/10 border border-amber-500/30 rounded-lg p-4 text-center">
-                                      <p className="text-slate-400 text-xs mb-1">Post-AOW Shortfall</p>
+                                      <p className="text-slate-400 text-xs mb-1">{t.retirement.postAowShortfall}</p>
                                       <p className="text-amber-400 text-2xl font-black">€{postAowGap.toLocaleString()}</p>
                                       <p className="text-slate-500 text-xs mt-1">€{postAowMonthlyGap.toLocaleString()}/mo gap × {Math.round(postAowYears)}yr</p>
                                     </div>
                                     <div className={`${wealthDelta >= 0 ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'} border rounded-lg p-4 text-center`}>
-                                      <p className="text-slate-400 text-xs mb-1">Total Capital Needed</p>
+                                      <p className="text-slate-400 text-xs mb-1">{t.retirement.totalCapitalNeeded}</p>
                                       <p className={`${wealthDelta >= 0 ? 'text-emerald-400' : 'text-red-400'} text-2xl font-black`}>€{totalCapitalNeeded.toLocaleString()}</p>
-                                      <p className="text-slate-500 text-xs mt-1">Current wealth: €{currentWealth.toLocaleString()}</p>
+                                      <p className="text-slate-500 text-xs mt-1">{t.retirement.currentWealth} €{currentWealth.toLocaleString()}</p>
                                     </div>
                                   </div>
                                 </div>
@@ -5185,7 +5527,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             <div className={`rounded-xl p-5 border ${wealthDelta >= 0 ? 'bg-emerald-500/10 border-emerald-500/30' : 'bg-red-500/10 border-red-500/30'}`}>
                               <div className="flex items-center justify-between">
                                 <div>
-                                  <p className="text-slate-400 text-sm">{wealthDelta >= 0 ? 'Estimated Surplus' : 'Estimated Shortfall'}</p>
+                                  <p className="text-slate-400 text-sm">{wealthDelta >= 0 ? t.retirement.estimatedSurplus : t.retirement.estimatedShortfall}</p>
                                   <p className={`text-3xl font-black ${wealthDelta >= 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                                     {wealthDelta >= 0 ? '+' : ''}€{wealthDelta.toLocaleString()}
                                   </p>
@@ -5201,7 +5543,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                                 <div>
                                   <h4 className="text-red-400 font-bold mb-2">"The government just moved the goalposts."</h4>
                                   <p className="text-slate-300 text-sm leading-relaxed">
-                                    Your AOW age is projected to be <strong className="text-white">{aowAgeLabel}</strong>, but inflation is rising faster than state benefits. A <strong className="text-white">€{Math.round(postAowMonthlyGap > 0 ? postAowMonthlyGap : 1500).toLocaleString()}/month</strong> shortfall during your bridge years could cost you <strong className="text-red-300">€{Math.round((postAowMonthlyGap > 0 ? postAowMonthlyGap : 1500) * 12 * bridgeYears).toLocaleString()}</strong> in extra savings. <strong className="text-emerald-400">Get the full 'Safe Withdrawal' roadmap in your PDF</strong> to ensure you never run out of money.
+                                    {language === 'nl' ? 'Je AOW-leeftijd wordt geschat op' : 'Your AOW age is projected to be'} <strong className="text-white">{aowAgeLabel}</strong>{language === 'nl' ? ', maar inflatie stijgt sneller dan de uitkeringen. Een' : ', but inflation is rising faster than state benefits. A'} <strong className="text-white">€{Math.round(postAowMonthlyGap > 0 ? postAowMonthlyGap : 1500).toLocaleString()}/month</strong> {t.retirement.shortfallCost} <strong className="text-red-300">€{Math.round((postAowMonthlyGap > 0 ? postAowMonthlyGap : 1500) * 12 * bridgeYears).toLocaleString()}</strong> {t.retirement.inExtraSavings} <strong className="text-emerald-400">{language === 'nl' ? "Bekijk de volledige 'Safe Withdrawal' routekaart in je PDF" : "Get the full 'Safe Withdrawal' roadmap in your PDF"}</strong> {t.retirement.ensureNeverRun}
                                   </p>
                                 </div>
                               </div>
@@ -5221,7 +5563,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                       <svg className="w-4 h-4 sm:w-5 sm:h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10 19l-7-7m0 0l7-7m-7 7h18" />
                       </svg>
-                      Back
+                      {t.household.back}
                     </button>
                     <button
                       onClick={handleContinue}
@@ -5234,11 +5576,11 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                           </svg>
-                          Analyzing (up to 5 min)...
+                          {t.retirement.analyzing}
                         </>
                       ) : (
                         <>
-                          Submit & Analyze
+                          {t.retirement.submitAnalyze}
                           <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                             <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7" />
                           </svg>
@@ -5256,9 +5598,9 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
   }
 
   return (
-    <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-slate-950">
+    <div className={pageBg}>
       {/* Top Fixed Navigation Bar */}
-      <nav className="fixed top-0 left-0 right-0 bg-slate-900/95 backdrop-blur-sm border-b border-slate-800 z-50">
+      <nav className={`fixed top-0 left-0 right-0 backdrop-blur-sm border-b z-50 ${darkMode ? 'bg-slate-900/95 border-slate-800' : 'bg-white/95 border-slate-200 shadow-sm'}`}>
         <div className="max-w-7xl mx-auto px-4 sm:px-6">
           <div className="flex items-center justify-between h-16">
             {/* Logo */}
@@ -5278,6 +5620,23 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
             {/* Right Side Actions */}
             <div className="flex items-center gap-2 sm:gap-4">
+              {/* Dark / Light mode toggle */}
+              <button
+                onClick={toggleDarkMode}
+                className="text-slate-400 hover:text-white transition-colors p-2 rounded-lg hover:bg-slate-800"
+                title={darkMode ? 'Switch to light mode' : 'Switch to dark mode'}
+              >
+                {darkMode ? (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 3v1m0 16v1m9-9h-1M4 12H3m15.364 6.364l-.707-.707M6.343 6.343l-.707-.707m12.728 0l-.707.707M6.343 17.657l-.707.707M16 12a4 4 0 11-8 0 4 4 0 018 0z" />
+                  </svg>
+                ) : (
+                  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
+                  </svg>
+                )}
+              </button>
+
               {/* Language Dropdown */}
               <div className="relative">
                 <button
@@ -5295,30 +5654,34 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 </button>
                 
                 {showLangDropdown && (
-                  <div className="absolute right-0 mt-2 w-48 bg-slate-800 border border-slate-700 rounded-lg shadow-lg overflow-hidden z-50">
+                  <div className={`absolute right-0 mt-2 w-48 border rounded-lg shadow-lg overflow-hidden z-50 ${darkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
                     <button
                       onClick={() => {
                         setLanguage('en');
                         setShowLangDropdown(false);
                       }}
-                      className={`w-full text-left px-4 py-3 hover:bg-slate-700 transition-colors flex items-center justify-between ${
-                        language === 'en' ? 'bg-slate-700 text-white' : 'text-slate-300'
+                      className={`w-full text-left px-4 py-3 transition-colors flex items-center justify-between ${
+                        language === 'en'
+                          ? (darkMode ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-900')
+                          : (darkMode ? 'text-slate-300 hover:bg-slate-700' : 'text-slate-600 hover:bg-slate-50')
                       }`}
                     >
                       <span>English</span>
-                      <span className="text-sm text-slate-400">EN</span>
+                      <span className={`text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>EN</span>
                     </button>
                     <button
                       onClick={() => {
                         setLanguage('nl');
                         setShowLangDropdown(false);
                       }}
-                      className={`w-full text-left px-4 py-3 hover:bg-slate-700 transition-colors flex items-center justify-between ${
-                        language === 'nl' ? 'bg-slate-700 text-white' : 'text-slate-300'
+                      className={`w-full text-left px-4 py-3 transition-colors flex items-center justify-between ${
+                        language === 'nl'
+                          ? (darkMode ? 'bg-slate-700 text-white' : 'bg-slate-100 text-slate-900')
+                          : (darkMode ? 'text-slate-300 hover:bg-slate-700' : 'text-slate-600 hover:bg-slate-50')
                       }`}
                     >
                       <span>Nederlands</span>
-                      <span className="text-sm text-slate-400">NL</span>
+                      <span className={`text-sm ${darkMode ? 'text-slate-400' : 'text-slate-500'}`}>NL</span>
                     </button>
                   </div>
                 )}
@@ -5341,18 +5704,18 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
         <div className="max-w-7xl mx-auto">
           {/* Coming Soon Badge */}
           <div className="flex justify-center mb-8">
-            <div className="flex items-center gap-2 bg-red-950/30 border border-red-800/50 rounded-full px-5 py-2">
-              <svg className="w-5 h-5 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <div className={`flex items-center gap-2 rounded-full px-5 py-2 ${darkMode ? 'bg-red-950/30 border border-red-800/50' : 'bg-red-50 border border-red-200'}`}>
+              <svg className={`w-5 h-5 ${darkMode ? 'text-red-500' : 'text-red-600'}`} fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <circle cx="12" cy="12" r="10" strokeWidth="2"/>
                 <path strokeWidth="2" strokeLinecap="round" d="M12 6v6l4 2"/>
               </svg>
-              <span className="text-red-400 font-medium">{t.hero.badge}</span>
+              <span className={`font-medium ${darkMode ? 'text-red-400' : 'text-red-600'}`}>{t.hero.badge}</span>
             </div>
           </div>
 
           {/* Hero Section */}
           <div className="text-center mb-16">
-            <h1 className="text-4xl md:text-5xl font-bold text-white mb-5 leading-tight">
+            <h1 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white mb-5 leading-tight">
               {t.hero.title} <span className="text-emerald-400">{t.hero.titleHighlight}</span>
             </h1>
             <p className="text-slate-400 text-base max-w-4xl mx-auto leading-relaxed">
@@ -5365,20 +5728,20 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             <div className="flex items-center gap-3 sm:gap-6 md:gap-8">
               {/* Now - Green */}
               <div className="flex flex-col items-center">
-                <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-full border-2 sm:border-3 border-emerald-500 bg-slate-900 flex items-center justify-center mb-2 shadow-lg shadow-emerald-500/30">
+                <div className={`w-12 h-12 sm:w-16 sm:h-16 rounded-full border-2 sm:border-3 border-emerald-500 flex items-center justify-center mb-2 ${darkMode ? 'bg-slate-900 shadow-lg shadow-emerald-500/30' : 'bg-white shadow-md'}`}>
                   <span className="text-emerald-500 font-bold text-sm sm:text-base">{t.hero.now}</span>
                 </div>
                 <span className="text-slate-400 text-xs sm:text-sm font-medium">{t.hero.nowLabel}</span>
               </div>
 
               {/* Progress Line */}
-              <div className="w-24 sm:w-48 md:w-64 h-1 bg-slate-700 relative">
-                <div className="absolute left-0 top-0 h-full w-1/3 bg-gradient-to-r from-emerald-500 to-slate-700"></div>
+              <div className={`w-24 sm:w-48 md:w-64 h-1 relative ${darkMode ? 'bg-slate-700' : 'bg-slate-200'}`}>
+                <div className={`absolute left-0 top-0 h-full w-1/3 bg-gradient-to-r from-emerald-500 ${darkMode ? 'to-slate-700' : 'to-slate-200'}`}></div>
               </div>
 
               {/* 2028 - Red */}
               <div className="flex flex-col items-center">
-                <div className="w-12 h-12 sm:w-16 sm:h-16 rounded-full border-2 sm:border-3 border-red-500 bg-slate-900 flex items-center justify-center mb-2 shadow-lg shadow-red-500/30">
+                <div className={`w-12 h-12 sm:w-16 sm:h-16 rounded-full border-2 sm:border-3 border-red-500 flex items-center justify-center mb-2 ${darkMode ? 'bg-slate-900 shadow-lg shadow-red-500/30' : 'bg-white shadow-md'}`}>
                   <span className="text-red-500 font-bold text-sm sm:text-base">{t.hero.year2028}</span>
                 </div>
                 <span className="text-slate-400 text-xs sm:text-sm font-medium">{t.hero.year2028Label}</span>
@@ -5389,22 +5752,22 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
           {/* Calculator Section - Two Column Layout */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-12">
             {/* Left Card - Your Situation */}
-            <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-6">
+            <div className={`backdrop-blur-sm border rounded-2xl p-6 ${darkMode ? 'bg-slate-800/40 border-slate-700' : 'bg-white border-slate-200 shadow-md'}`}>
               <div className="flex items-center justify-between mb-6">
-                <h3 className="text-lg font-bold text-white">Your Situation</h3>
-                <button className="text-xs font-medium bg-slate-700 text-slate-300 px-3 py-1 rounded">Single</button>
+                <h3 className="text-lg font-bold text-white">{t.calcPage.yourSituation}</h3>
+                <button className={`text-xs font-medium px-3 py-1 rounded ${darkMode ? 'bg-slate-700 text-slate-300' : 'bg-slate-100 text-slate-600'}`}>{t.calcPage.single}</button>
               </div>
 
               {/* Bank & Savings */}
               <div className="mb-6">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="text-emerald-400 text-lg">💰</span>
-                  <h4 className="font-bold text-white">Bank & Savings</h4>
+                  <h4 className="font-bold text-white">{t.calcPage.bankSavings}</h4>
                 </div>
                 <div className="space-y-4">
                   <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
                     <div className="flex justify-between items-center mb-3">
-                      <label className="text-white font-medium text-sm">Savings Balance</label>
+                      <label className="text-white font-medium text-sm">{t.calcPage.savingsBalance}</label>
                       <span className="text-emerald-400 font-semibold text-sm">€{savingsBalance.toLocaleString()}</span>
                     </div>
                     <input
@@ -5419,7 +5782,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   </div>
                   <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
                     <div className="flex justify-between items-center mb-3">
-                      <label className="text-white font-medium text-sm">Interest Earned</label>
+                      <label className="text-white font-medium text-sm">{t.calcPage.interestEarned}</label>
                       <span className="text-emerald-400 font-semibold text-sm">€{interestEarned.toLocaleString()}</span>
                     </div>
                     <input
@@ -5439,12 +5802,12 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               <div className="mb-6">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="text-blue-400 text-lg">📈</span>
-                  <h4 className="font-bold text-white">Stocks & Crypto</h4>
+                  <h4 className="font-bold text-white">{t.calcPage.stocksCrypto}</h4>
                 </div>
                 <div className="space-y-4">
                   <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
                     <div className="flex justify-between items-center mb-3">
-                      <label className="text-white font-medium text-sm">Value Jan 1</label>
+                      <label className="text-white font-medium text-sm">{t.calcPage.valueJan1}</label>
                       <span className="text-emerald-400 font-semibold text-sm">€{cryptoValueJan1.toLocaleString()}</span>
                     </div>
                     <input
@@ -5459,7 +5822,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   </div>
                   <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
                     <div className="flex justify-between items-center mb-3">
-                      <label className="text-white font-medium text-sm">Value Dec 31</label>
+                      <label className="text-white font-medium text-sm">{t.calcPage.valueDec31}</label>
                       <span className="text-emerald-400 font-semibold text-sm">€{cryptoValueDec31.toLocaleString()}</span>
                     </div>
                     <input
@@ -5474,7 +5837,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   </div>
                   <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
                     <div className="flex justify-between items-center mb-3">
-                      <label className="text-white font-medium text-sm">Dividends Received</label>
+                      <label className="text-white font-medium text-sm">{t.calcPage.dividends}</label>
                       <span className="text-emerald-400 font-semibold text-sm">€{dividendsReceived.toLocaleString()}</span>
                     </div>
                     <input
@@ -5494,12 +5857,12 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               <div className="mb-6">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="text-orange-400 text-lg">🏠</span>
-                  <h4 className="font-bold text-white">Real Estate (excl. primary home)</h4>
+                  <h4 className="font-bold text-white">{t.calcPage.realEstate}</h4>
                 </div>
                 <div className="space-y-4">
                   <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
                     <div className="flex justify-between items-center mb-3">
-                      <label className="text-white font-medium text-sm">Property Value</label>
+                      <label className="text-white font-medium text-sm">{t.calcPage.propertyValue}</label>
                       <span className="text-emerald-400 font-semibold text-sm">€{propertyValue.toLocaleString()}</span>
                     </div>
                     <input
@@ -5514,7 +5877,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   </div>
                   <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
                     <div className="flex justify-between items-center mb-3">
-                      <label className="text-white font-medium text-sm">Rental Income</label>
+                      <label className="text-white font-medium text-sm">{t.calcPage.rentalIncome}</label>
                       <span className="text-emerald-400 font-semibold text-sm">€{rentalIncome.toLocaleString()}</span>
                     </div>
                     <input
@@ -5529,7 +5892,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   </div>
                   <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
                     <div className="flex justify-between items-center mb-3">
-                      <label className="text-white font-medium text-sm">Sale Proceeds (if not sold)</label>
+                      <label className="text-white font-medium text-sm">{t.calcPage.saleProceeds}</label>
                       <span className="text-emerald-400 font-semibold text-sm">€{saleProceeds.toLocaleString()}</span>
                     </div>
                     <input
@@ -5544,7 +5907,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                   </div>
                   <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
                     <div className="flex justify-between items-center mb-3">
-                      <label className="text-white font-medium text-sm">Purchase Price</label>
+                      <label className="text-white font-medium text-sm">{t.calcPage.purchasePrice}</label>
                       <span className="text-emerald-400 font-semibold text-sm">€{purchasePrice.toLocaleString()}</span>
                     </div>
                     <input
@@ -5564,12 +5927,12 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               <div className="mb-6">
                 <div className="flex items-center gap-2 mb-4">
                   <span className="text-red-400 text-lg">🔴</span>
-                  <h4 className="font-bold text-white">Deductions</h4>
+                  <h4 className="font-bold text-white">{t.calcPage.deductions}</h4>
                 </div>
                 <div>
                   <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
                     <div className="flex justify-between items-center mb-3">
-                      <label className="text-white font-medium text-sm">Costs (debt interest, etc.)</label>
+                      <label className="text-white font-medium text-sm">{t.calcPage.costs}</label>
                       <span className="text-emerald-400 font-semibold text-sm">€{debtInterest.toLocaleString()}</span>
                     </div>
                     <input
@@ -5589,12 +5952,12 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               <div>
                 <div className="flex items-center gap-2 mb-4">
                   <span className="text-purple-400 text-lg">📊</span>
-                  <h4 className="font-bold text-white">Loss Carry-Forward</h4>
+                  <h4 className="font-bold text-white">{t.calcPage.lossCarryForward}</h4>
                 </div>
                 <div>
                   <div className="bg-white/5 backdrop-blur-sm rounded-lg p-4 border border-white/10">
                     <div className="flex justify-between items-center mb-3">
-                      <label className="text-white font-medium text-sm">Prior Year Loss</label>
+                      <label className="text-white font-medium text-sm">{t.calcPage.priorYearLoss}</label>
                       <span className="text-emerald-400 font-semibold text-sm">€{priorYearLoss.toLocaleString()}</span>
                     </div>
                     <input
@@ -5612,20 +5975,20 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             </div>
 
             {/* Right Card - Your Tax Comparison */}
-            <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-6">
-              <h3 className="text-lg font-bold text-white mb-6">Tax Comparison</h3>
+            <div className={`backdrop-blur-sm border rounded-2xl p-6 ${darkMode ? 'bg-slate-800/40 border-slate-700' : 'bg-white border-slate-200 shadow-md'}`}>
+              <h3 className="text-lg font-bold text-white mb-6">{t.calcPage.taxComparison}</h3>
 
               {/* Old System 2024 - Collapsible Breakdown */}
-              <div className="bg-slate-700/30 rounded-xl p-5 mb-6 border border-slate-700">
+              <div className={`rounded-xl p-5 mb-6 border ${darkMode ? 'bg-slate-700/30 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
                 <button 
                   onClick={() => setExpandTax2024(!expandTax2024)}
                   className="w-full flex justify-between items-center hover:bg-slate-700/20 rounded-lg p-2 transition-colors"
                 >
                   <div className="flex items-center gap-3">
-                    <span className="text-slate-300 font-medium text-sm">Old System — Fictional Yield (2024)</span>
+                    <span className="text-slate-300 font-medium text-sm">{t.calcPage.oldSystem}</span>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="text-2xl font-bold text-white">€{Math.round(currentTax).toLocaleString()}/yr</span>
+                    <span className="text-2xl font-bold text-white">€{Math.round(currentTax).toLocaleString()}{language === 'nl' ? '/jr' : '/yr'}</span>
                     <svg 
                       className={`w-5 h-5 text-slate-400 transition-transform ${expandTax2024 ? 'rotate-180' : ''}`} 
                       fill="none" 
@@ -5641,35 +6004,35 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 {expandTax2024 && (
                   <div className="bg-slate-800/50 rounded-lg p-4 mt-4 space-y-3 text-xs border-t border-slate-600">
                     <div className="border-b border-slate-600 pb-3">
-                      <p className="text-slate-400 mb-2">📊 Asset Base (January 1):</p>
+                      <p className="text-slate-400 mb-2">📊 {t.calcPage.assetBase}:</p>
                       <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
-                        <span>• Savings: €{savingsBalance.toLocaleString()}</span>
-                        <span>• Stocks/Crypto: €{cryptoValueJan1.toLocaleString()}</span>
-                        <span>• Real Estate: €{propertyValue.toLocaleString()}</span>
-                        <span className="font-semibold text-white">Total Assets: €{(savingsBalance + cryptoValueJan1 + propertyValue).toLocaleString()}</span>
+                        <span>• {t.calcPage.savings}: €{savingsBalance.toLocaleString()}</span>
+                        <span>• {t.calcPage.stocksCryptoLabel}: €{cryptoValueJan1.toLocaleString()}</span>
+                        <span>• {t.calcPage.realEstateLabel}: €{propertyValue.toLocaleString()}</span>
+                        <span className="font-semibold text-white">{t.calcPage.totalAssets}: €{(savingsBalance + cryptoValueJan1 + propertyValue).toLocaleString()}</span>
                       </div>
                     </div>
                     
                     <div className="border-b border-slate-600 pb-3">
-                      <p className="text-slate-400 mb-2">📈 Notional Returns (2024 Official Rates):</p>
+                      <p className="text-slate-400 mb-2">📈 {t.calcPage.notionalReturns}:</p>
                       <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
-                        <span>• Savings (1.03%): €{Math.round(savingsBalance * 0.0103).toLocaleString()}</span>
-                        <span>• Investments & Other (6.04%): €{Math.round((cryptoValueJan1 + propertyValue) * 0.0604).toLocaleString()}</span>
-                        <span className="font-semibold text-white col-span-2">Total Notional Return: €{Math.round(savingsBalance * 0.0103 + (cryptoValueJan1 + propertyValue) * 0.0604).toLocaleString()}</span>
+                        <span>• {t.calcPage.savingsRate}: €{Math.round(savingsBalance * 0.0103).toLocaleString()}</span>
+                        <span>• {t.calcPage.investmentsRate}: €{Math.round((cryptoValueJan1 + propertyValue) * 0.0604).toLocaleString()}</span>
+                        <span className="font-semibold text-white col-span-2">{t.calcPage.totalNotionalReturn}: €{Math.round(savingsBalance * 0.0103 + (cryptoValueJan1 + propertyValue) * 0.0604).toLocaleString()}</span>
                       </div>
                     </div>
                     
                     <div className="border-b border-slate-600 pb-3">
-                      <p className="text-slate-400 mb-2">⚖️ Effective Yield & Taxable Base:</p>
+                      <p className="text-slate-400 mb-2">⚖️ {t.calcPage.effectiveYield}:</p>
                       <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
-                        <span>• Effective Yield: {((savingsBalance * 0.0103 + (cryptoValueJan1 + propertyValue) * 0.0604) / (savingsBalance + cryptoValueJan1 + propertyValue) * 100).toFixed(3)}%</span>
-                        <span>• Tax-Free Allowance: €57,000</span>
-                        <span className="font-semibold text-white col-span-2">Taxable Base: €{Math.max(0, (savingsBalance + cryptoValueJan1 + propertyValue) - 57000).toLocaleString()}</span>
+                        <span>• {t.calcPage.effectiveYieldLabel}: {((savingsBalance * 0.0103 + (cryptoValueJan1 + propertyValue) * 0.0604) / (savingsBalance + cryptoValueJan1 + propertyValue) * 100).toFixed(3)}%</span>
+                        <span>• {t.calcPage.taxFreeAllowance}</span>
+                        <span className="font-semibold text-white col-span-2">{t.calcPage.taxableBase}: €{Math.max(0, (savingsBalance + cryptoValueJan1 + propertyValue) - 57000).toLocaleString()}</span>
                       </div>
                     </div>
                     
                     <div>
-                      <p className="text-slate-400 mb-2">✖️ Final Calculation (Taxable Base × Effective Yield × 36%):</p>
+                      <p className="text-slate-400 mb-2">✖️ {t.calcPage.finalCalcDesc}:</p>
                       <div className="ml-2 text-white font-semibold">
                         € {Math.round(currentTax).toLocaleString()}
                       </div>
@@ -5679,16 +6042,16 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               </div>
 
               {/* New System 2028 - Collapsible Breakdown */}
-              <div className="bg-emerald-900/20 rounded-xl p-5 mb-6 border border-emerald-800">
+              <div className={`rounded-xl p-5 mb-6 border ${darkMode ? 'bg-emerald-900/20 border-emerald-800' : 'bg-emerald-50 border-emerald-200'}`}>
                 <button 
                   onClick={() => setExpandTax2028(!expandTax2028)}
                   className="w-full flex justify-between items-center hover:bg-emerald-900/30 rounded-lg p-2 transition-colors"
                 >
                   <div className="flex items-center gap-3">
-                    <span className="text-slate-300 font-medium text-sm">New System — Actual Returns (2028)</span>
+                    <span className="text-slate-300 font-medium text-sm">{t.calcPage.newSystem}</span>
                   </div>
                   <div className="flex items-center gap-3">
-                    <span className="text-2xl font-bold text-white">€{Math.round(newTax).toLocaleString()}/yr</span>
+                    <span className="text-2xl font-bold text-white">€{Math.round(newTax).toLocaleString()}{language === 'nl' ? '/jr' : '/yr'}</span>
                     <svg 
                       className={`w-5 h-5 text-emerald-400 transition-transform ${expandTax2028 ? 'rotate-180' : ''}`} 
                       fill="none" 
@@ -5704,36 +6067,36 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                 {expandTax2028 && (
                   <div className="bg-emerald-950/30 rounded-lg p-4 mt-4 space-y-3 text-xs border-t border-emerald-700">
                     <div className="border-b border-emerald-700 pb-3">
-                      <p className="text-emerald-300 mb-2">💰 Income Sources:</p>
+                      <p className="text-emerald-300 mb-2">💰 {t.calcPage.incomeSources}:</p>
                       <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
-                        <span>• Savings Interest: €{interestEarned.toLocaleString()}</span>
-                        <span>• Stock/Crypto Gain: €{Math.max(0, cryptoValueDec31 - cryptoValueJan1).toLocaleString()}</span>
-                        <span>• Dividends: €{dividendsReceived.toLocaleString()}</span>
-                        <span>• Rental Income: €{rentalIncome.toLocaleString()}</span>
-                        <span className="font-semibold text-white col-span-2">Total Income: €{(interestEarned + Math.max(0, cryptoValueDec31 - cryptoValueJan1) + dividendsReceived + rentalIncome).toLocaleString()}</span>
+                        <span>• {t.calcPage.savingsInterest}: €{interestEarned.toLocaleString()}</span>
+                        <span>• {t.calcPage.stockCryptoGain}: €{Math.max(0, cryptoValueDec31 - cryptoValueJan1).toLocaleString()}</span>
+                        <span>• {t.calcPage.dividends}: €{dividendsReceived.toLocaleString()}</span>
+                        <span>• {t.calcPage.rentalIncome}: €{rentalIncome.toLocaleString()}</span>
+                        <span className="font-semibold text-white col-span-2">{t.calcPage.totalIncome}: €{(interestEarned + Math.max(0, cryptoValueDec31 - cryptoValueJan1) + dividendsReceived + rentalIncome).toLocaleString()}</span>
                       </div>
                     </div>
                     
                     <div className="border-b border-emerald-700 pb-3">
-                      <p className="text-emerald-300 mb-2">📌 Deductions & Credits:</p>
+                      <p className="text-emerald-300 mb-2">📌 {t.calcPage.deductionsCredits}:</p>
                       <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
-                        <span>• Interest Costs: -€{debtInterest.toLocaleString()}</span>
-                        <span>• Prior Year Loss: -€{priorYearLoss.toLocaleString()}</span>
-                        <span className="font-semibold text-white col-span-2">Net Income: €{Math.max(0, interestEarned + Math.max(0, cryptoValueDec31 - cryptoValueJan1) + dividendsReceived + rentalIncome - debtInterest - priorYearLoss).toLocaleString()}</span>
+                        <span>• {t.calcPage.interestCosts}: -€{debtInterest.toLocaleString()}</span>
+                        <span>• {t.calcPage.priorYearLoss}: -€{priorYearLoss.toLocaleString()}</span>
+                        <span className="font-semibold text-white col-span-2">{t.calcPage.netIncome}: €{Math.max(0, interestEarned + Math.max(0, cryptoValueDec31 - cryptoValueJan1) + dividendsReceived + rentalIncome - debtInterest - priorYearLoss).toLocaleString()}</span>
                       </div>
                     </div>
                     
                     <div className="border-b border-emerald-700 pb-3">
-                      <p className="text-emerald-300 mb-2">🎯 Tax-Free Threshold & Final Tax:</p>
+                      <p className="text-emerald-300 mb-2">🎯 {t.calcPage.taxFreeThreshold}:</p>
                       <div className="grid grid-cols-2 gap-2 ml-2 text-slate-300">
-                        <span>• Taxable Profit: €{Math.max(0, Math.max(0, interestEarned + Math.max(0, cryptoValueDec31 - cryptoValueJan1) + dividendsReceived + rentalIncome - debtInterest - priorYearLoss) - 1800).toLocaleString()}</span>
-                        <span>• Tax Rate: 36%</span>
-                        <span className="font-semibold text-white col-span-2">Tax Due: €{Math.round(newTax).toLocaleString()}</span>
+                        <span>• {t.calcPage.taxableProfit}: €{Math.max(0, Math.max(0, interestEarned + Math.max(0, cryptoValueDec31 - cryptoValueJan1) + dividendsReceived + rentalIncome - debtInterest - priorYearLoss) - 1800).toLocaleString()}</span>
+                        <span>• {t.calcPage.taxRate}</span>
+                        <span className="font-semibold text-white col-span-2">{t.calcPage.taxDue}: €{Math.round(newTax).toLocaleString()}</span>
                       </div>
                     </div>
                     
                     <div className="bg-emerald-900/20 rounded-lg p-3 border border-emerald-700">
-                      <p className="text-emerald-200 mb-2 text-xs font-semibold">💧 Liquidity Note:</p>
+                      <p className="text-emerald-200 mb-2 text-xs font-semibold">💧 {t.calcPage.liquidityNote}:</p>
                       <div className="text-xs text-emerald-300">
                         {(() => {
                           const directCash = interestEarned + dividendsReceived + rentalIncome;
@@ -5741,8 +6104,8 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                           return (
                             <span>
                               {directCash > 0 
-                                ? `Your tax bill consumes ${liquidityPercent}% of direct cash income (Interest + Dividends + Rent).` 
-                                : 'No direct cash income to assess liquidity.'}
+                                ? `${t.calcPage.taxBillConsumes} ${liquidityPercent}${t.calcPage.ofDirectCash}` 
+                                : t.calcPage.noDirectCash}
                             </span>
                           );
                         })()}
@@ -5754,26 +6117,28 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
               {/* You'll Pay More/Less Box */}
               <div className={`rounded-xl p-5 border-2 mb-6 ${
-                difference < 0 ? 'bg-emerald-950/30 border-emerald-700' : 'bg-red-950/30 border-red-800'
+                difference < 0
+                  ? (darkMode ? 'bg-emerald-950/30 border-emerald-700' : 'bg-emerald-50 border-emerald-300')
+                  : (darkMode ? 'bg-red-950/30 border-red-800' : 'bg-red-50 border-red-300')
               }`}>
                 <div className="flex items-center gap-2 mb-2">
                   <span className="text-xl">{difference < 0 ? '📉' : '📈'}</span>
-                  <span className="text-white font-semibold text-sm">{difference < 0 ? 'You\'ll Pay Less' : 'You\'ll Pay More'}</span>
+                  <span className="text-white font-semibold text-sm">{difference < 0 ? t.calcPage.youllPayLess : t.calcPage.youllPayMore}</span>
                 </div>
                 <div className={`text-3xl font-bold mb-3 ${difference < 0 ? 'text-emerald-400' : 'text-red-400'}`}>
                   {difference < 0 ? '-' : '+'}€{Math.abs(Math.round(difference)).toLocaleString()}
-                  <span className="text-sm text-slate-400 font-normal ml-2">/ year</span>
+                  <span className="text-sm text-slate-400 font-normal ml-2">{t.calcPage.perYear}</span>
                 </div>
                 <p className={`text-xs leading-relaxed ${difference < 0 ? 'text-emerald-300' : 'text-red-300'}`}>
                   {difference < 0 
-                    ? '✓ The new system benefits you because your actual returns are lower than the fictional yield assumption.' 
-                    : '⚠️ The new system increases your tax burden because you have unrealized gains (especially from investments) that are now directly taxed.'}
+                    ? `✓ ${t.calcPage.payLessExplanation}` 
+                    : `⚠️ ${t.calcPage.payMoreExplanation}`}
                 </p>
               </div>
 
               {/* Portfolio vs Tax Liability Chart */}
-              <div className="bg-slate-900/20 rounded-lg p-6 mb-4 border border-slate-800">
-                <p className="text-xs text-slate-400 text-center mb-6 font-semibold">Portfolio vs Tax Liability</p>
+              <div className={`rounded-lg p-6 mb-4 border ${darkMode ? 'bg-slate-900/20 border-slate-800' : 'bg-slate-50 border-slate-200'}`}>
+                <p className="text-xs text-slate-400 text-center mb-6 font-semibold">{t.calcPage.portfolioVsTax}</p>
                 <div className="flex items-end justify-around gap-6" style={{ minHeight: '160px' }}>
                   {/* Portfolio Bar */}
                   <div className="flex flex-col items-center flex-1">
@@ -5781,7 +6146,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     <div className="w-16 bg-gradient-to-t from-emerald-500 to-emerald-400 rounded-t-lg border border-emerald-400" 
                          style={{ height: `${Math.min(120, (netWorth / 1000000) * 120)}px` }}>
                     </div>
-                    <span className="text-xs text-slate-400 mt-3 font-medium">Portfolio</span>
+                    <span className="text-xs text-slate-400 mt-3 font-medium">{t.calcPage.portfolio}</span>
                   </div>
                   {/* Old Tax Bar */}
                   <div className="flex flex-col items-center flex-1">
@@ -5789,7 +6154,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     <div className="w-16 bg-gradient-to-t from-slate-500 to-slate-400 rounded-t-lg border border-slate-400" 
                          style={{ height: `${Math.min(120, (currentTax / 5000) * 120)}px` }}>
                     </div>
-                    <span className="text-xs text-slate-400 mt-3 font-medium">2024 Tax</span>
+                    <span className="text-xs text-slate-400 mt-3 font-medium">{t.calcPage.tax2024}</span>
                   </div>
                   {/* New Tax Bar */}
                   <div className="flex flex-col items-center flex-1">
@@ -5797,28 +6162,28 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
                     <div className="w-16 bg-gradient-to-t from-emerald-600 to-emerald-500 rounded-t-lg border border-emerald-500" 
                          style={{ height: `${Math.min(120, (newTax / 5000) * 120)}px` }}>
                     </div>
-                    <span className="text-xs text-slate-400 mt-3 font-medium">2028 Tax</span>
+                    <span className="text-xs text-slate-400 mt-3 font-medium">{t.calcPage.tax2028}</span>
                   </div>
                 </div>
                 <div className="mt-6 pt-4 border-t border-slate-700 text-center">
                   <p className="text-xs text-slate-400">
-                    <span className="font-medium">Your tax efficiency:</span> {newTax === currentTax ? 'Neutral' : newTax < currentTax ? '✓ Better in 2028' : '⚠️ Worse in 2028'}
+                    <span className="font-medium">{t.calcPage.taxEfficiency}</span> {newTax === currentTax ? t.calcPage.neutral : newTax < currentTax ? t.calcPage.betterIn2028 : t.calcPage.worseIn2028}
                   </p>
                 </div>
               </div>
 
               {/* Info Message */}
-              <div className="bg-slate-900/30 rounded-lg p-3 border border-slate-700">
+              <div className={`rounded-lg p-3 border ${darkMode ? 'bg-slate-900/30 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
                 <p className="text-xs text-slate-400 leading-relaxed">
-                  <strong className="text-slate-300">ℹ️ Notice:</strong> This is an estimation tool based on the 2028 Box 3 proposal. Actual legislation may differ. Consult a tax advisor for personalized advice.
+                  <strong className="text-slate-300">ℹ️ {t.calcPage.notice}:</strong> {t.calcPage.noticeText}
                 </p>
               </div>
 
               {/* Counter-Evidence Opportunity */}
               {potentialRefund > 0 && (
-                <div className="bg-yellow-950/30 border border-yellow-700/50 rounded-lg p-4 mt-4">
+                <div className={`border rounded-lg p-4 mt-4 ${darkMode ? 'bg-yellow-950/30 border-yellow-700/50' : 'bg-yellow-50 border-yellow-200'}`}>
                   <p className="text-xs text-yellow-300 leading-relaxed">
-                    <strong className="text-yellow-200">💡 2024 Opportunity:</strong> You could potentially save €{Math.round(potentialRefund).toLocaleString()} by using the counter-evidence scheme if your actual returns are lower than the fictional rate.
+                    <strong className="text-yellow-200">💡 {t.calcPage.opportunity2024}:</strong> {t.calcPage.opportunityPrefix} €{Math.round(potentialRefund).toLocaleString()} {t.calcPage.opportunitySuffix} {t.calcPage.opportunityText}
                   </p>
                 </div>
               )}
@@ -5826,19 +6191,19 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
           </div>
 
           {/* Detailed 2028 Comparison CTA */}
-          <div className="flex justify-center mb-12">
+          <div className="flex justify-center mb-12 px-2">
             <button
               onClick={() => setShowBox3Comparison(true)}
-              className="group relative bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-bold px-8 py-4 rounded-2xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105 flex items-center gap-3"
+              className="group relative bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white font-bold px-4 sm:px-8 py-3 sm:py-4 rounded-2xl shadow-lg hover:shadow-xl transition-all transform hover:scale-105 flex items-center gap-2 sm:gap-3 w-full sm:w-auto"
             >
-              <div className="w-10 h-10 bg-white/20 rounded-lg flex items-center justify-center">
+              <div className="w-8 h-8 sm:w-10 sm:h-10 bg-white/20 rounded-lg flex items-center justify-center flex-shrink-0">
                 <svg className="w-5 h-5 text-white" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
                 </svg>
               </div>
               <div className="text-left">
-                <span className="block text-lg">Detailed Comparison of 2028 Changes</span>
-                <span className="block text-indigo-200 text-xs font-normal">See portfolio projections, FIRE impact & tax simulation side-by-side</span>
+                <span className="block text-base sm:text-lg">{t.calcPage.detailedComparison}</span>
+                <span className="block text-indigo-200 text-xs font-normal hidden sm:block">{t.calcPage.seeProjections}</span>
               </div>
               <svg className="w-5 h-5 text-white/70 group-hover:translate-x-1 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7l5 5m0 0l-5 5m5-5H6" />
@@ -5849,7 +6214,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
           {/* Information Cards - 3 Column Layout */}
           <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-12">
             {/* Box 1 - Red - The Risk */}
-            <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <div className="w-12 h-12 bg-red-500/20 rounded-lg flex items-center justify-center mb-6">
                 <svg className="w-7 h-7 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
@@ -5867,7 +6232,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             </div>
 
             {/* Box 2 - Green - The Opportunity */}
-            <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <div className="w-12 h-12 bg-emerald-500/20 rounded-lg flex items-center justify-center mb-6">
                 <svg className="w-7 h-7 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
@@ -5885,7 +6250,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             </div>
 
             {/* Box 3 - Yellow - Smart Optimization */}
-            <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <div className="w-12 h-12 bg-yellow-500/20 rounded-lg flex items-center justify-center mb-6">
                 <svg className="w-7 h-7 text-yellow-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
@@ -5917,8 +6282,8 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
       </div>
 
       {/* Different Shade Section - Navigate Your Wealth */}
-      <div id="features" className="bg-slate-950/80 border-y border-slate-800">
-        <div className="max-w-7xl mx-auto px-6 py-20">
+      <div id="features" className={darkMode ? 'bg-slate-950/80 border-y border-slate-800' : 'bg-white border-y border-slate-200'}>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12 sm:py-20">
           {/* New Hero Section - Navigate Your Wealth */}
           <div className="mb-12">
             {/* Badge */}
@@ -5933,7 +6298,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
             {/* Main Headline */}
             <div className="text-center mb-10">
-              <h2 className="text-4xl md:text-5xl font-bold text-white mb-6 leading-tight">
+              <h2 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white mb-6 leading-tight">
                 {t.features.title} <span className="text-emerald-400">{t.features.titleHighlight}</span>
               </h2>
               <p className="text-slate-400 text-base max-w-4xl mx-auto leading-relaxed">
@@ -5942,11 +6307,11 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             </div>
 
             {/* Action Buttons */}
-            <div className="flex justify-center gap-4 mb-16">
-              <button className="bg-emerald-500 hover:bg-emerald-600 text-white font-semibold text-base px-8 py-4 rounded-xl transition-all shadow-lg hover:shadow-emerald-500/50">
+            <div className="flex flex-col sm:flex-row justify-center gap-3 sm:gap-4 mb-16 px-4 sm:px-0">
+              <button className="bg-emerald-500 hover:bg-emerald-600 text-white font-semibold text-base px-6 sm:px-8 py-3 sm:py-4 rounded-xl transition-all shadow-lg hover:shadow-emerald-500/50">
                 {t.features.startPlan}
               </button>
-              <button className="bg-transparent border-2 border-slate-600 hover:border-slate-500 text-white font-semibold text-base px-8 py-4 rounded-xl transition-all">
+              <button className={`bg-transparent border-2 font-semibold text-base px-6 sm:px-8 py-3 sm:py-4 rounded-xl transition-all ${darkMode ? 'border-slate-600 hover:border-slate-500 text-white' : 'border-slate-300 hover:border-slate-400 text-slate-700'}`}>
                 {t.features.seeHow}
               </button>
             </div>
@@ -5954,7 +6319,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             {/* Feature Cards - 3 Column */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
               {/* Tax Optimization */}
-              <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-8 text-center">
+              <div className={`${cardClass} rounded-2xl p-8 text-center`}>
                 <div className="w-16 h-16 bg-emerald-500/10 rounded-xl flex items-center justify-center mx-auto mb-6">
                   <svg className="w-8 h-8 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
@@ -5967,7 +6332,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               </div>
 
               {/* Global Portability */}
-              <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-8 text-center">
+              <div className={`${cardClass} rounded-2xl p-8 text-center`}>
                 <div className="w-16 h-16 bg-emerald-500/10 rounded-xl flex items-center justify-center mx-auto mb-6">
                   <svg className="w-8 h-8 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -5980,7 +6345,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               </div>
 
               {/* Wealth Forecasting */}
-              <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-8 text-center">
+              <div className={`${cardClass} rounded-2xl p-8 text-center`}>
                 <div className="w-16 h-16 bg-emerald-500/10 rounded-xl flex items-center justify-center mx-auto mb-6">
                   <svg className="w-8 h-8 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M13 7h8m0 0v8m0-8l-8 8-4-4-6 6" />
@@ -5998,8 +6363,8 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
       </div>
 
       {/* Features Section - Everything You Need to Engineer Freedom */}
-      <div className="bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950">
-        <div className="max-w-7xl mx-auto px-6 py-20">
+      <div className={darkMode ? 'bg-gradient-to-br from-slate-900 via-slate-900 to-slate-950' : 'bg-slate-50'}>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12 sm:py-20">
           {/* Features Badge */}
           <div className="text-center mb-6">
             <span className="text-emerald-400 text-sm font-semibold tracking-wider">{t.featuresDetail.badge}</span>
@@ -6007,7 +6372,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
           {/* Section Title */}
           <div className="text-center mb-12">
-            <h2 className="text-4xl md:text-5xl font-bold text-white mb-6 leading-tight">
+            <h2 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white mb-6 leading-tight">
               {t.featuresDetail.title}
             </h2>
             <p className="text-slate-400 text-base max-w-4xl mx-auto leading-relaxed">
@@ -6018,7 +6383,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
           {/* Feature Grid - 2 Rows x 2 Columns */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-12">
             {/* Box 1 - Real Estate & Mortgage Strategy */}
-            <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <div className="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
                 <svg className="w-7 h-7 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6 0a1 1 0 001-1v-4a1 1 0 011-1h2a1 1 0 011 1v4a1 1 0 001 1m-6 0h6" />
@@ -6032,7 +6397,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             </div>
 
             {/* Box 2 - Tax-Free Wealth Transfer */}
-            <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <div className="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
                 <svg className="w-7 h-7 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z" />
@@ -6046,7 +6411,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             </div>
 
             {/* Box 3 - International Tax Treaties */}
-            <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <div className="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
                 <svg className="w-7 h-7 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3.055 11H5a2 2 0 012 2v1a2 2 0 002 2 2 2 0 012 2v2.945M8 3.935V5.5A2.5 2.5 0 0010.5 8h.5a2 2 0 012 2 2 2 0 104 0 2 2 0 012-2h1.064M15 20.488V18a2 2 0 012-2h3.064M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
@@ -6060,7 +6425,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             </div>
 
             {/* Box 4 - Box 3 Tax Revolution */}
-            <div className="bg-slate-800/50 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <div className="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
                 <svg className="w-7 h-7 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
@@ -6077,8 +6442,8 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
       </div>
 
       {/* Pricing Section - Invest in Your Financial Freedom */}
-      <div id="pricing" className="bg-slate-950/90">
-        <div className="max-w-7xl mx-auto px-6 py-20">
+      <div id="pricing" className={darkMode ? 'bg-slate-950/90' : 'bg-white'}>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12 sm:py-20">
           {/* Pricing Badge */}
           <div className="text-center mb-6">
             <span className="text-emerald-400 text-sm font-semibold tracking-wider">{t.pricing.badge}</span>
@@ -6086,7 +6451,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
           {/* Section Title */}
           <div className="text-center mb-16">
-            <h2 className="text-4xl md:text-5xl font-bold text-white mb-6 leading-tight">
+            <h2 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white mb-6 leading-tight">
               {t.pricing.title}
             </h2>
             <p className="text-slate-400 text-base max-w-4xl mx-auto leading-relaxed">
@@ -6095,12 +6460,12 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
           </div>
 
           {/* Pricing Cards - 3 Column Grid */}
-          <div className="grid grid-cols-1 md:grid-cols-3 gap-6 max-w-6xl mx-auto">
+          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 max-w-6xl mx-auto">
             {/* Free Plan */}
-            <div className="bg-slate-800/40 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <h3 className="text-2xl font-bold text-white mb-2">{t.pricing.free}</h3>
               <div className="mb-6">
-                <span className="text-5xl font-bold text-white">{t.pricing.freePrice}</span>
+                <span className="text-4xl sm:text-5xl font-bold text-white">{t.pricing.freePrice}</span>
                 <span className="text-slate-400 text-lg ml-2">{t.pricing.freeForever}</span>
               </div>
               <p className="text-slate-400 text-sm mb-8">
@@ -6137,14 +6502,14 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
               <button 
                 onClick={handleGetStarted}
-                className="w-full bg-slate-700 hover:bg-slate-600 text-white font-semibold py-3 px-6 rounded-xl transition-all"
+                className={`w-full font-semibold py-3 px-6 rounded-xl transition-all ${darkMode ? 'bg-slate-700 hover:bg-slate-600 text-white' : 'bg-slate-100 hover:bg-slate-200 text-slate-700'}`}
               >
                 {t.pricing.btnGetStarted}
               </button>
             </div>
 
             {/* Premium Plan - Most Popular */}
-            <div className="bg-slate-800/40 backdrop-blur-sm border-2 border-emerald-500 rounded-2xl p-8 relative">
+            <div className={`${darkMode ? 'bg-slate-800/40 backdrop-blur-sm' : 'bg-white shadow-md'} border-2 border-emerald-500 rounded-2xl p-6 sm:p-8 relative`}>
               {/* Most Popular Badge */}
               <div className="absolute -top-4 left-1/2 transform -translate-x-1/2">
                 <div className="bg-emerald-500 text-white text-sm font-semibold px-4 py-1 rounded-full flex items-center gap-1">
@@ -6156,9 +6521,13 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
               </div>
 
               <h3 className="text-2xl font-bold text-white mb-2 mt-4">{t.pricing.premium}</h3>
-              <div className="mb-6">
-                <span className="text-5xl font-bold text-white">{t.pricing.premiumPrice}</span>
+              <div className="mb-2">
+                <span className="text-4xl sm:text-5xl font-bold text-white">{t.pricing.premiumPrice}</span>
                 <span className="text-slate-400 text-lg ml-2">{t.pricing.premiumTime}</span>
+              </div>
+              <div className="mb-6 flex items-center gap-3">
+                <span className="text-slate-500 text-lg line-through">{t.pricing.premiumOriginal}</span>
+                <span className="bg-red-500 text-white text-xs font-bold px-2 py-1 rounded-full">{t.pricing.premiumDiscount}</span>
               </div>
               <p className="text-slate-400 text-sm mb-8">
                 {t.pricing.premiumDesc}
@@ -6213,7 +6582,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             </div>
 
             {/* Annual Plan - Coming Soon */}
-            <div className="bg-slate-800/20 backdrop-blur-sm border border-slate-700/50 rounded-2xl p-8 relative opacity-60">
+            <div className={`${cardClass} rounded-2xl p-8 relative opacity-60`}>
               {/* Coming Soon Badge */}
               <div className="absolute -top-4 left-1/2 transform -translate-x-1/2">
                 <div className="bg-slate-600 text-slate-300 text-sm font-semibold px-4 py-1 rounded-full flex items-center gap-1">
@@ -6227,7 +6596,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
               <h3 className="text-2xl font-bold text-slate-400 mb-2 mt-4">{t.pricing.annual}</h3>
               <div className="mb-6">
-                <span className="text-5xl font-bold text-slate-400">{t.pricing.annualPrice}</span>
+                <span className="text-4xl sm:text-5xl font-bold text-slate-400">{t.pricing.annualPrice}</span>
                 <span className="text-slate-500 text-lg ml-2">{t.pricing.annualTime}</span>
               </div>
               <p className="text-slate-500 text-sm mb-8">
@@ -6277,8 +6646,8 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
       </div>
 
       {/* Trust & Privacy Section */}
-      <div id="trust" className="bg-slate-900/60">
-        <div className="max-w-7xl mx-auto px-6 py-20">
+      <div id="trust" className={darkMode ? 'bg-slate-900/60' : 'bg-slate-50'}>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-12 sm:py-20">
           {/* Trust Badge */}
           <div className="text-center mb-6">
             <span className="text-emerald-400 text-sm font-semibold tracking-wider">{t.trust.badge}</span>
@@ -6286,7 +6655,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
 
           {/* Section Title */}
           <div className="text-center mb-16">
-            <h2 className="text-4xl md:text-5xl font-bold text-white mb-6 leading-tight">
+            <h2 className="text-3xl sm:text-4xl md:text-5xl font-bold text-white mb-6 leading-tight">
               {t.trust.title}
             </h2>
             <p className="text-slate-400 text-base max-w-4xl mx-auto leading-relaxed">
@@ -6297,7 +6666,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
           {/* Trust Features Grid - 2x2 */}
           <div className="grid grid-cols-1 md:grid-cols-2 gap-6 max-w-5xl mx-auto">
             {/* End-to-End Encryption */}
-            <div className="bg-slate-800/30 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <div className="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
                 <svg className="w-7 h-7 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />
@@ -6310,7 +6679,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             </div>
 
             {/* Privacy-First Architecture */}
-            <div className="bg-slate-800/30 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <div className="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
                 <svg className="w-7 h-7 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
@@ -6324,7 +6693,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             </div>
 
             {/* GDPR Compliant */}
-            <div className="bg-slate-800/30 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <div className="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
                 <svg className="w-7 h-7 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M9 12l2 2 4-4m5.618-4.016A11.955 11.955 0 0112 2.944a11.955 11.955 0 01-8.618 3.04A12.02 12.02 0 003 9c0 5.591 3.824 10.29 9 11.622 5.176-1.332 9-6.03 9-11.622 0-1.042-.133-2.052-.382-3.016z" />
@@ -6337,7 +6706,7 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
             </div>
 
             {/* No Third-Party Sharing */}
-            <div className="bg-slate-800/30 backdrop-blur-sm border border-slate-700 rounded-2xl p-8">
+            <div className={`${cardClass} rounded-2xl p-8`}>
               <div className="w-12 h-12 bg-emerald-500/10 rounded-lg flex items-center justify-center mb-6">
                 <svg className="w-7 h-7 text-emerald-500" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20 7l-8-4-8 4m16 0l-8 4m8-4v10l-8 4m0-10L4 7m8 4v10M4 7v10l8 4" />
@@ -6353,8 +6722,8 @@ IMPORTANT: Do NOT write any introduction, preamble, or opening paragraph. Start 
       </div>
 
       {/* Footer */}
-      <footer className="bg-slate-950 border-t border-slate-800">
-        <div className="max-w-7xl mx-auto px-6 py-12">
+      <footer className={darkMode ? 'bg-slate-950 border-t border-slate-800' : 'bg-white border-t border-slate-200'}>
+        <div className="max-w-7xl mx-auto px-4 sm:px-6 py-8 sm:py-12">
           <div className="flex flex-col md:flex-row items-center justify-between gap-6">
             {/* Logo */}
             <div className="flex items-center gap-2">

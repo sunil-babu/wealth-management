@@ -2,6 +2,22 @@
 @tailwind components;
 @tailwind utilities;
 
+/* ═══════════════════════════════════════════════════════
+   Theme CSS Custom Properties
+   ═══════════════════════════════════════════════════════ */
+
+:root {
+  --scrollbar-track: #f1f5f9;
+  --scrollbar-thumb: #cbd5e1;
+  --scrollbar-thumb-hover: #94a3b8;
+}
+
+.dark {
+  --scrollbar-track: #0f172a;
+  --scrollbar-thumb: #334155;
+  --scrollbar-thumb-hover: #475569;
+}
+
 html { 
   scroll-behavior: smooth;
 }
@@ -12,7 +28,227 @@ html, body, #root {
   padding: 0;
 }
 
-/* Custom Green Slider Styling */
+/* ═══════════════════════════════════════════════════════
+   Light Mode Overrides
+   When <html> does NOT have .dark, remap the dark palette
+   to a clean white/light design.
+   ═══════════════════════════════════════════════════════ */
+
+/* ── Page & section backgrounds ── */
+:root:not(.dark) .bg-gradient-to-br.from-slate-950,
+:root:not(.dark) .bg-gradient-to-br.from-slate-900 {
+  background: #f8fafc !important;
+}
+:root:not(.dark) .bg-gradient-to-r.from-slate-900.to-slate-800 {
+  background: linear-gradient(to right, #f1f5f9, #e2e8f0) !important;
+}
+:root:not(.dark) .bg-gradient-to-br.from-slate-900.to-slate-950,
+:root:not(.dark) .bg-gradient-to-br.via-slate-900 {
+  background: #f1f5f9 !important;
+}
+
+/* ── Solid card/panel backgrounds ── */
+:root:not(.dark) .bg-slate-800 { background-color: #ffffff !important; }
+:root:not(.dark) .bg-slate-900 { background-color: #f8fafc !important; }
+:root:not(.dark) .bg-slate-950 { background-color: #f1f5f9 !important; }
+:root:not(.dark) .bg-slate-700 { background-color: #f1f5f9 !important; }
+
+/* ── Fractional-opacity slate backgrounds (bg-slate-800/40 etc.) ── */
+:root:not(.dark) [class*="bg-slate-950/"] { background-color: #f1f5f9 !important; }
+:root:not(.dark) [class*="bg-slate-900/"] { background-color: #f8fafc !important; }
+:root:not(.dark) [class*="bg-slate-800/"] { background-color: #ffffff !important; }
+:root:not(.dark) [class*="bg-slate-700/"] { background-color: #f1f5f9 !important; }
+
+/* ── White-alpha backgrounds (invisible on light bg) → subtle gray ── */
+:root:not(.dark) [class*="bg-white/5"],
+:root:not(.dark) [class*="bg-white/10"] {
+  background-color: #f1f5f9 !important;
+}
+
+/* ── White-alpha borders → visible on light ── */
+:root:not(.dark) [class*="border-white/"] {
+  border-color: #e2e8f0 !important;
+}
+
+/* ── Card shadow for depth on white backgrounds ── */
+:root:not(.dark) [class*="bg-slate-800"],
+:root:not(.dark) [class*="bg-slate-700"] {
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08), 0 1px 2px rgba(0,0,0,0.04);
+}
+
+/* ── Nav / sticky headers ── */
+:root:not(.dark) [class*="bg-slate-950/"],
+:root:not(.dark) [class*="bg-slate-900/"] {
+  box-shadow: 0 1px 3px rgba(0,0,0,0.08);
+  backdrop-filter: blur(12px);
+}
+
+/* ── Inner gradient cards ── */
+:root:not(.dark) .bg-gradient-to-br.from-slate-900.to-slate-800 {
+  background: #ffffff !important;
+  box-shadow: 0 1px 4px rgba(0,0,0,0.08);
+}
+:root:not(.dark) .bg-gradient-to-t.from-emerald-500,
+:root:not(.dark) .bg-gradient-to-t.from-emerald-600 {
+  background: linear-gradient(to top, #10b981, #34d399) !important;
+}
+
+/* ═════════ ACCENT COLOR OVERRIDES FOR LIGHT MODE ═════════ */
+
+/* Red accent backgrounds → soft light red */
+:root:not(.dark) [class*="bg-red-950/"],
+:root:not(.dark) [class*="bg-red-900/"] {
+  background-color: #fef2f2 !important;
+}
+:root:not(.dark) [class*="border-red-800"],
+:root:not(.dark) [class*="border-red-700"] {
+  border-color: #fca5a5 !important;
+}
+:root:not(.dark) .text-red-400 { color: #dc2626 !important; }
+:root:not(.dark) .text-red-500 { color: #dc2626 !important; }
+:root:not(.dark) .text-red-300 { color: #b91c1c !important; }
+:root:not(.dark) .border-red-500 { border-color: #f87171 !important; }
+:root:not(.dark) .shadow-red-500\/30 { --tw-shadow-color: rgba(248,113,113,0.15); }
+
+/* Green / Emerald accent backgrounds → soft light green */
+:root:not(.dark) [class*="bg-emerald-900/"],
+:root:not(.dark) [class*="bg-emerald-950/"] {
+  background-color: #ecfdf5 !important;
+}
+:root:not(.dark) [class*="border-emerald-800"],
+:root:not(.dark) [class*="border-emerald-700"] {
+  border-color: #6ee7b7 !important;
+}
+:root:not(.dark) .text-emerald-400 { color: #059669 !important; }
+:root:not(.dark) .text-emerald-300 { color: #047857 !important; }
+:root:not(.dark) .text-emerald-200 { color: #065f46 !important; }
+:root:not(.dark) .shadow-emerald-500\/30 { --tw-shadow-color: rgba(16,185,129,0.15); }
+
+/* Yellow accent backgrounds → soft yellow */
+:root:not(.dark) [class*="bg-yellow-950/"],
+:root:not(.dark) [class*="bg-yellow-900/"] {
+  background-color: #fefce8 !important;
+}
+:root:not(.dark) [class*="border-yellow-700"] {
+  border-color: #fde047 !important;
+}
+:root:not(.dark) .text-yellow-300,
+:root:not(.dark) .text-yellow-200 { color: #a16207 !important; }
+
+/* Emerald/accent icon containers — keep tinted in light mode */
+:root:not(.dark) [class*="bg-emerald-500/10"],
+:root:not(.dark) [class*="bg-emerald-500/20"] {
+  background-color: #d1fae5 !important;
+}
+:root:not(.dark) [class*="bg-red-500/20"] {
+  background-color: #fee2e2 !important;
+}
+:root:not(.dark) [class*="bg-yellow-500/20"] {
+  background-color: #fef9c3 !important;
+}
+
+/* ═════════ TEXT ═════════ */
+:root:not(.dark) .text-white { color: #0f172a; }
+:root:not(.dark) .text-slate-300 { color: #475569; }
+:root:not(.dark) .text-slate-400 { color: #64748b; }
+:root:not(.dark) .text-slate-500 { color: #94a3b8; }
+
+/* Keep white text inside colored accent buttons / containers */
+:root:not(.dark) [class*="bg-emerald-5"] .text-white,
+:root:not(.dark) [class*="bg-emerald-6"] .text-white,
+:root:not(.dark) [class*="bg-indigo"] .text-white,
+:root:not(.dark) [class*="bg-purple"] .text-white,
+:root:not(.dark) [class*="bg-teal"] .text-white,
+:root:not(.dark) [class*="bg-blue-5"] .text-white,
+:root:not(.dark) [class*="bg-blue-6"] .text-white,
+:root:not(.dark) [class*="bg-red-5"] .text-white,
+:root:not(.dark) [class*="bg-red-6"] .text-white,
+:root:not(.dark) [class*="from-emerald"] .text-white,
+:root:not(.dark) [class*="from-indigo"] .text-white,
+:root:not(.dark) [class*="from-purple"] .text-white,
+:root:not(.dark) [class*="from-teal"] .text-white,
+:root:not(.dark) [class*="from-red"] .text-white,
+:root:not(.dark) .bg-emerald-500,
+:root:not(.dark) .bg-emerald-600 {
+  color: #ffffff;
+}
+:root:not(.dark) .bg-emerald-500 .text-white,
+:root:not(.dark) .bg-emerald-600 .text-white,
+:root:not(.dark) .bg-blue-500 .text-white,
+:root:not(.dark) .bg-purple-500 .text-white,
+:root:not(.dark) [class*="bg-gradient-to-r"][class*="from-indigo"] .text-white,
+:root:not(.dark) [class*="bg-gradient-to-r"][class*="from-emerald"] .text-white {
+  color: #ffffff !important;
+}
+
+/* Gradient text heading → dark */
+:root:not(.dark) .bg-clip-text.text-transparent {
+  --tw-gradient-from: #0f172a var(--tw-gradient-from-position);
+  --tw-gradient-via:  #334155 var(--tw-gradient-via-position);
+  --tw-gradient-to:   #64748b var(--tw-gradient-to-position);
+}
+
+/* ═════════ BORDERS ═════════ */
+:root:not(.dark) .border-slate-700 { border-color: #e2e8f0 !important; }
+:root:not(.dark) .border-slate-800 { border-color: #e2e8f0 !important; }
+:root:not(.dark) .border-slate-600 { border-color: #cbd5e1 !important; }
+:root:not(.dark) [class*="border-slate-700/"] { border-color: #e2e8f0 !important; }
+:root:not(.dark) [class*="border-slate-600/"] { border-color: #cbd5e1 !important; }
+
+/* ═════════ HOVER STATES ═════════ */
+:root:not(.dark) .hover\:text-white:hover { color: #0f172a !important; }
+:root:not(.dark) .hover\:bg-slate-800:hover { background-color: #f1f5f9 !important; }
+:root:not(.dark) .hover\:bg-slate-800\/50:hover { background-color: rgba(241,245,249,0.5) !important; }
+:root:not(.dark) .hover\:bg-slate-700:hover { background-color: #e2e8f0 !important; }
+:root:not(.dark) .hover\:bg-slate-700\/20:hover { background-color: rgba(226,232,240,0.4) !important; }
+:root:not(.dark) .hover\:bg-emerald-900\/30:hover { background-color: rgba(209,250,229,0.5) !important; }
+:root:not(.dark) .hover\:bg-slate-700\/20:hover { background-color: rgba(226,232,240,0.4) !important; }
+
+/* ═════════ FORM INPUTS ═════════ */
+:root:not(.dark) select.bg-slate-800,
+:root:not(.dark) input.bg-slate-800,
+:root:not(.dark) textarea.bg-slate-800 {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+  border-color: #cbd5e1 !important;
+}
+:root:not(.dark) input.bg-transparent,
+:root:not(.dark) select.bg-transparent {
+  color: #0f172a !important;
+}
+:root:not(.dark) select option {
+  background-color: #ffffff;
+  color: #0f172a;
+}
+:root:not(.dark) input::placeholder,
+:root:not(.dark) textarea::placeholder {
+  color: #94a3b8;
+}
+
+/* ═════════ SLIDER / RANGE ═════════ */
+:root:not(.dark) input[type="range"] {
+  background-color: #e2e8f0;
+}
+:root:not(.dark) [class*="bg-white/10"][class*="rounded-lg"] {
+  background-color: #e2e8f0 !important;
+}
+
+/* ═════════ TIMELINE CIRCLES ═════════ */
+:root:not(.dark) .bg-slate-900[class*="rounded-full"] {
+  background-color: #ffffff !important;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+}
+
+/* ═════════ PROGRESS LINE ═════════ */
+:root:not(.dark) .bg-slate-700[class*="h-1"],
+:root:not(.dark) .bg-slate-700[class*="relative"] {
+  background-color: #e2e8f0 !important;
+}
+
+/* ═══════════════════════════════════════════════════════
+   Custom Green Slider Styling
+   ═══════════════════════════════════════════════════════ */
+
 .slider-green {
   -webkit-appearance: none;
   appearance: none;
@@ -51,22 +287,25 @@ html, body, #root {
   box-shadow: 0 0 0 6px rgba(16, 185, 129, 0.4);
 }
 
-/* Custom scrollbar */
+/* ═══════════════════════════════════════════════════════
+   Custom scrollbar (themed)
+   ═══════════════════════════════════════════════════════ */
+
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: #0f172a;
+  background: var(--scrollbar-track);
 }
 
 ::-webkit-scrollbar-thumb {
-  background: #334155;
+  background: var(--scrollbar-thumb);
   border-radius: 4px;
 }
 
 ::-webkit-scrollbar-thumb:hover {
-  background: #475569;
+  background: var(--scrollbar-thumb-hover);
 }
 
