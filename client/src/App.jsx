@@ -16,12 +16,15 @@ export default function App() {
 
   useEffect(() => {
     const root = document.documentElement;
+    const themeColorMeta = document.getElementById('theme-color-meta');
     if (darkMode) {
       root.classList.add('dark');
       localStorage.setItem('theme', 'dark');
+      if (themeColorMeta) themeColorMeta.setAttribute('content', '#020617');
     } else {
       root.classList.remove('dark');
       localStorage.setItem('theme', 'light');
+      if (themeColorMeta) themeColorMeta.setAttribute('content', '#f8fafc');
     }
   }, [darkMode]);
 

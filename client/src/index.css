@@ -16,6 +16,8 @@
   --scrollbar-track: #0f172a;
   --scrollbar-thumb: #334155;
   --scrollbar-thumb-hover: #475569;
+  color-scheme: dark;
+  background-color: #020617; /* slate-950 */
 }
 
 html { 
@@ -26,6 +28,18 @@ html, body, #root {
   height: 100%; 
   margin: 0;
   padding: 0;
+}
+
+/* ── Base html/body backgrounds (prevents mobile dark bleed-through) ── */
+.dark body {
+  background-color: #020617;
+}
+:root:not(.dark) {
+  color-scheme: light;
+  background-color: #f8fafc; /* slate-50 */
+}
+:root:not(.dark) body {
+  background-color: #f8fafc;
 }
 
 /* ═══════════════════════════════════════════════════════
